@@ -27,6 +27,8 @@ eval "$(node --input-type=module -e "
 ")"
 
 [ -n "$DATABASE_URL" ] || { echo "DATABASE_URL is not set" >&2; exit 1; }
+# DATA_DIR is usually relative (./data); pin it to an absolute path before any cd.
+if [ -d "$DATA_DIR" ]; then DATA_DIR="$(cd "$DATA_DIR" && pwd)"; fi
 command -v pg_dump >/dev/null || { echo "pg_dump not found (install postgresql-client)" >&2; exit 1; }
 
 BACKUP_ROOT="${1:-$APP_DIR/backups}"
