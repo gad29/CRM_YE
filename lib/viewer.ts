@@ -1,4 +1,5 @@
 // Bridges the session cookie to the store's visibility model (Node runtime).
+import { NextResponse } from 'next/server';
 import { getCurrentSession, type SessionPayload } from '@/lib/admin-session';
 import type { Viewer } from '@/lib/store';
 
@@ -19,4 +20,23 @@ export async function getViewer(): Promise<{ session: SessionPayload; viewer: Vi
 /** The id recorded in openedBy/createdBy fields for the current session. */
 export function actorId(session: SessionPayload) {
   return session.scope === 'worker' && session.workerId ? session.workerId : 'admin';
+}
+
+/**
+ * Route-handler guard: the live, database-checked session, or a ready 401
+ * response. Every API handler calls this (or requireAdmin) — the middleware's
+ * cookie check alone does not see revoked sessions.
+ */
+export async function requireViewer() {
+  const auth = await getViewer();
+  if (!auth) return NextResponse.json({ ok: false, error: 'Sign-in required' }, { status: 401 });
+  return auth;
+}
+
+/** Like requireViewer, but only for admins (403 for workers). */
+export async function requireAdmin() {
+  const auth = await requireViewer();
+  if (auth instanceof NextResponse) return auth;
+  if (auth.viewer.role !== 'admin') return NextResponse.json({ ok: false, error: 'Admin access required' }, { status: 403 });
+  return auth;
 }

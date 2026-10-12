@@ -17,11 +17,11 @@ export async function POST(request: NextRequest) {
   if (!body.channelId) return NextResponse.json({ ok: false, error: 'חסר מזהה שיחה' }, { status: 400 });
 
   const me = actorId(auth.session);
-  const channel = resolveChannelForMember(body.channelId, me);
+  const channel = await resolveChannelForMember(body.channelId, me);
   if (!channel) {
     return NextResponse.json({ ok: false, error: 'השיחה לא נמצאה' }, { status: 404 });
   }
 
-  markChannelRead(body.channelId, me);
+  await markChannelRead(body.channelId, me);
   return NextResponse.json({ ok: true });
 }

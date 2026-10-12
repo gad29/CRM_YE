@@ -8,18 +8,12 @@ export const env = {
   adminSessionSecret: process.env.ADMIN_SESSION_SECRET,
   adminSessionHours: process.env.ADMIN_SESSION_HOURS || '24',
 
-  appBaseUrl: process.env.APP_BASE_URL || 'http://localhost:3000',
+  appBaseUrl: (process.env.APP_BASE_URL || 'http://localhost:3000').replace(/\/$/, ''),
 
-  /** Base URL of the n8n webhook endpoint, e.g. https://n8n.example.com/webhook */
-  n8nWebhookBaseUrl: process.env.N8N_WEBHOOK_BASE_URL,
-  /** Shared secret n8n sends in x-crmye-api-key when reading data from the app.
-   *  CASEPOINT_API_TOKEN is honored as a fallback for deployments configured
-   *  before the project was renamed to CRM_YE. */
-  apiAccessToken: process.env.CRMYE_API_TOKEN || process.env.CASEPOINT_API_TOKEN,
-  /** Shared secret for POST /api/webhooks/n8n when not using an admin session. */
-  n8nForwarderSecret: process.env.N8N_FORWARDER_SECRET,
+  /** Header the reverse proxy puts the real client IP in (nginx: x-real-ip, Caddy: x-forwarded-for). */
+  clientIpHeader: (process.env.CLIENT_IP_HEADER || 'x-real-ip').toLowerCase(),
 
-  /** Root folder for the JSON database and per-client document folders. */
+  /** Root folder for client document folders, chat files and templates. */
   dataDir: process.env.DATA_DIR || './data',
   uploadMaxFileBytes: (() => {
     const raw = process.env.UPLOAD_MAX_FILE_BYTES;
@@ -27,6 +21,35 @@ export const env = {
     if (Number.isFinite(parsed) && parsed > 0) return Math.floor(parsed);
     return 25 * 1024 * 1024;
   })(),
+
+  // ── Email via Resend ───────────────────────────────────────────────────────
+  resendApiKey: process.env.RESEND_API_KEY || '',
+  /** Testing only — point at a local fake instead of the real API. */
+  resendApiBase: (process.env.RESEND_API_BASE || 'https://api.resend.com').replace(/\/$/, ''),
+  /** Verified sender, e.g. "משרד יעוץ <noreply@your-domain.co.il>". */
+  emailFrom: process.env.EMAIL_FROM || '',
+  emailReplyTo: process.env.EMAIL_REPLY_TO || '',
+
+  // ── WhatsApp via Meta Cloud API ────────────────────────────────────────────
+  whatsappToken: process.env.WHATSAPP_ACCESS_TOKEN || '',
+  whatsappPhoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || '',
+  whatsappApiVersion: process.env.WHATSAPP_API_VERSION || 'v23.0',
+  /** Testing only — point at a local fake instead of the real Graph API. */
+  whatsappApiBase: (process.env.WHATSAPP_API_BASE || 'https://graph.facebook.com').replace(/\/$/, ''),
+  /** App secret — verifies the X-Hub-Signature-256 of delivery-status webhooks. */
+  whatsappAppSecret: process.env.WHATSAPP_APP_SECRET || '',
+  /** Any string; typed into Meta's webhook setup to prove we own the endpoint. */
+  whatsappVerifyToken: process.env.WHATSAPP_VERIFY_TOKEN || '',
+  whatsappTemplateLang: process.env.WHATSAPP_TEMPLATE_LANG || 'he',
+  /** Country code prepended to local numbers like 050-1234567. */
+  defaultCountryCode: (process.env.DEFAULT_COUNTRY_CODE || '972').replace(/\D/g, ''),
+  whatsappTemplates: {
+    otp: process.env.WHATSAPP_TEMPLATE_OTP || 'crmye_password_reset',
+    documents: process.env.WHATSAPP_TEMPLATE_DOCUMENTS || 'crmye_documents_link',
+    reminder: process.env.WHATSAPP_TEMPLATE_REMINDER || 'crmye_task_reminder',
+    taskAssigned: process.env.WHATSAPP_TEMPLATE_TASK_ASSIGNED || 'crmye_task_assigned',
+    chat: process.env.WHATSAPP_TEMPLATE_CHAT || 'crmye_chat_message',
+  },
 };
 
 export function looksLikePlaceholder(value?: string | null) {
@@ -41,12 +64,12 @@ export function hasAdminPassword() {
   );
 }
 
-export function hasN8nConfig() {
-  return Boolean(env.n8nWebhookBaseUrl && !looksLikePlaceholder(env.n8nWebhookBaseUrl));
+export function hasResendConfig() {
+  return Boolean(env.resendApiKey && env.emailFrom && !looksLikePlaceholder(env.resendApiKey));
 }
 
-export function hasApiAccessToken() {
-  return Boolean(env.apiAccessToken && !looksLikePlaceholder(env.apiAccessToken));
+export function hasWhatsAppConfig() {
+  return Boolean(env.whatsappToken && env.whatsappPhoneNumberId && !looksLikePlaceholder(env.whatsappToken));
 }
 
 export function hasLiveAppBaseUrl() {
@@ -55,4 +78,21 @@ export function hasLiveAppBaseUrl() {
 
 export function isProductionLike() {
   return process.env.NODE_ENV === 'production' || hasLiveAppBaseUrl();
+}
+
+/**
+ * Problems that make a production deployment unsafe to run. The server
+ * refuses to start while any exist (see instrumentation.ts) — failing closed
+ * beats silently running with a guessable session secret or no login at all.
+ */
+export function productionConfigProblems(): string[] {
+  const problems: string[] = [];
+  if (!process.env.DATABASE_URL) problems.push('DATABASE_URL is not set');
+  if (!hasAdminPassword()) problems.push('ADMIN_PASSWORD or ADMIN_PASSWORD_HASH must be set to a real value');
+  const secret = env.adminSessionSecret || '';
+  if (secret.length < 32 || looksLikePlaceholder(secret)) {
+    problems.push('ADMIN_SESSION_SECRET must be a random string of at least 32 characters (openssl rand -hex 32)');
+  }
+  if (!/^https:\/\//.test(env.appBaseUrl)) problems.push('APP_BASE_URL must be the public https:// address of the site');
+  return problems;
 }

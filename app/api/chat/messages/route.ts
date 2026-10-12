@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import type { ReminderChannel } from '@/data/domain';
+import type { ReminderChannel } from '@/lib/domain';
 import {
   getOrCreateDirectChannel,
   listChannelMessages,
@@ -20,16 +20,16 @@ export async function GET(request: NextRequest) {
   const channelId = request.nextUrl.searchParams.get('channelId');
   if (!channelId) return NextResponse.json({ ok: false, error: 'חסר מזהה שיחה' }, { status: 400 });
 
-  const channel = resolveChannelForMember(channelId, me);
+  const channel = await resolveChannelForMember(channelId, me);
   if (!channel) {
     return NextResponse.json({ ok: false, error: 'השיחה לא נמצאה' }, { status: 404 });
   }
 
   const after = request.nextUrl.searchParams.get('after') || undefined;
-  const messages = listChannelMessages(channelId, { afterId: after });
+  const messages = await listChannelMessages(channelId, { afterId: after });
 
   // Opening/polling a conversation marks it read.
-  if (request.nextUrl.searchParams.get('markRead') !== '0') markChannelRead(channelId, me);
+  if (request.nextUrl.searchParams.get('markRead') !== '0') await markChannelRead(channelId, me);
 
   return NextResponse.json({ ok: true, data: { channel, messages, me } });
 }
@@ -97,7 +97,7 @@ export async function POST(request: NextRequest) {
     }
     // Allow addressing a person directly; the DM channel is created on demand.
     if (!json.channelId && json.memberId) {
-      const channel = getOrCreateDirectChannel(me, json.memberId);
+      const channel = await getOrCreateDirectChannel(me, json.memberId);
       if (!channel) return NextResponse.json({ ok: false, error: 'לא ניתן לפתוח שיחה' }, { status: 400 });
       channelId = channel.id;
     } else {
@@ -114,7 +114,7 @@ export async function POST(request: NextRequest) {
   if (!channelId) return NextResponse.json({ ok: false, error: 'חסר מזהה שיחה' }, { status: 400 });
 
   // Creates the direct conversation the first time someone writes in it.
-  const channel = resolveChannelForMember(channelId, me);
+  const channel = await resolveChannelForMember(channelId, me);
   if (!channel) {
     return NextResponse.json({ ok: false, error: 'השיחה לא נמצאה' }, { status: 404 });
   }

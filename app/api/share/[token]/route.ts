@@ -1,21 +1,18 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { getConfig, getDocument, readDocumentFile } from '@/lib/store';
+import { getConfig, getDocument, getDocuments, readDocumentFile } from '@/lib/store';
 import { parseShareToken } from '@/lib/share';
-import type { DocumentRecord } from '@/data/domain';
+import { fileResponse } from '@/lib/file-response';
+import type { DocumentRecord } from '@/lib/domain';
 
-function streamDocument(record: DocumentRecord) {
+function streamDocument(record: DocumentRecord, download = false) {
   const file = readDocumentFile(record);
   if (!file) return NextResponse.json({ ok: false, error: 'הקובץ חסר' }, { status: 404 });
-  const encodedName = encodeURIComponent(record.originalName);
-  return new NextResponse(new Uint8Array(file), {
-    headers: {
-      'Content-Type': record.mimeType || 'application/octet-stream',
-      'Content-Length': String(file.length),
-      'Content-Disposition': `inline; filename*=UTF-8''${encodedName}`,
-      'Cache-Control': 'private, no-store',
-    },
-  });
+  const response = fileResponse(file, { mimeType: record.mimeType, fileName: record.originalName, download });
+  // The token is in the URL — never leak it through a Referer header.
+  response.headers.set('Referrer-Policy', 'no-referrer');
+  response.headers.set('X-Robots-Tag', 'noindex, nofollow');
+  return response;
 }
 
 function escapeHtml(value: string) {
@@ -86,7 +83,15 @@ function bundlePage(token: string, docs: DocumentRecord[], businessName: string)
 </html>`;
 
   return new NextResponse(html, {
-    headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'private, no-store' },
+    headers: {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'private, no-store',
+      // Static page: inline styles only, no script, nothing external.
+      'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      'Referrer-Policy': 'no-referrer',
+      'X-Robots-Tag': 'noindex, nofollow',
+      'X-Content-Type-Options': 'nosniff',
+    },
   });
 }
 
@@ -108,30 +113,19 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (!parsed.documentIds.includes(requestedId)) {
       return NextResponse.json({ ok: false, error: 'הקישור אינו מתיר גישה למסמך זה' }, { status: 403 });
     }
-    const record = getDocument(requestedId);
+    const record = await getDocument(requestedId);
     if (!record) return NextResponse.json({ ok: false, error: 'המסמך לא נמצא' }, { status: 404 });
-    if (request.nextUrl.searchParams.get('download') === '1') {
-      const file = readDocumentFile(record);
-      if (!file) return NextResponse.json({ ok: false, error: 'הקובץ חסר' }, { status: 404 });
-      const encodedName = encodeURIComponent(record.originalName);
-      return new NextResponse(new Uint8Array(file), {
-        headers: {
-          'Content-Type': record.mimeType || 'application/octet-stream',
-          'Content-Length': String(file.length),
-          'Content-Disposition': `attachment; filename*=UTF-8''${encodedName}`,
-          'Cache-Control': 'private, no-store',
-        },
-      });
-    }
-    return streamDocument(record);
+    return streamDocument(record, request.nextUrl.searchParams.get('download') === '1');
   }
 
+  // Keep the order the documents were shared in.
+  const found = await getDocuments(parsed.documentIds);
   const docs = parsed.documentIds
-    .map((id) => getDocument(id))
+    .map((id) => found.find((d) => d.id === id))
     .filter((d): d is DocumentRecord => Boolean(d));
   if (!docs.length) return NextResponse.json({ ok: false, error: 'המסמכים לא נמצאו' }, { status: 404 });
 
   // A single document opens directly; multiple render the bundle page.
   if (docs.length === 1) return streamDocument(docs[0]);
-  return bundlePage(token, docs, getConfig().businessName);
+  return bundlePage(token, docs, (await getConfig()).businessName);
 }

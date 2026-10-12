@@ -1,13 +1,18 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { PAYMENT_METHOD_LABELS, type PaymentMethod } from '@/data/domain';
+import { PAYMENT_METHOD_LABELS, type PaymentMethod } from '@/lib/domain';
 import { createPayment, listPayments } from '@/lib/store';
+import { requireAdmin } from '@/lib/viewer';
 
 export async function GET() {
-  return NextResponse.json({ ok: true, data: listPayments() });
+  const guard = await requireAdmin();
+  if (guard instanceof NextResponse) return guard;
+  return NextResponse.json({ ok: true, data: await listPayments() });
 }
 
 export async function POST(request: NextRequest) {
+  const guard = await requireAdmin();
+  if (guard instanceof NextResponse) return guard;
   let body: { clientId?: string; caseId?: string; amount?: number; method?: PaymentMethod; paidAt?: string; note?: string };
   try {
     body = await request.json();
@@ -20,7 +25,7 @@ export async function POST(request: NextRequest) {
   }
   const method: PaymentMethod = body.method && body.method in PAYMENT_METHOD_LABELS ? body.method : 'other';
 
-  const record = createPayment({
+  const record = await createPayment({
     clientId: body.clientId,
     caseId: body.caseId,
     amount: body.amount,

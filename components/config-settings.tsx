@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { CASE_STAGES, STAGE_LABELS, type AppConfig, type CaseStage, type ConfigOption } from '@/data/domain';
+import { CASE_STAGES, STAGE_LABELS, type AppConfig, type CaseStage, type ConfigOption } from '@/lib/domain';
 import { useConfigRefresh } from '@/components/config-provider';
 
 function SavedTag({ show }: { show: boolean }) {

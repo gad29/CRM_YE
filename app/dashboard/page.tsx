@@ -1,3 +1,4 @@
+import { redirect } from 'next/navigation';
 import Link from 'next/link';
 import {
   countMissingItems,
@@ -7,7 +8,7 @@ import {
   TASK_PRIORITY_LABELS,
   type CaseStage,
   type TaskPriority,
-} from '@/data/domain';
+} from '@/lib/domain';
 import { getCurrentSession } from '@/lib/admin-session';
 import {
   assigneeContact,
@@ -74,16 +75,18 @@ function formatDate(iso: string) {
 
 export default async function DashboardPage() {
   const session = await getCurrentSession();
-  const viewer = session ? sessionToViewer(session) : ({ role: 'admin' } as const);
+  // Middleware already guards this page; never fall back to an admin view.
+  if (!session) redirect('/login');
+  const viewer = sessionToViewer(session);
   const isAdmin = viewer.role === 'admin';
-  const config = getConfig();
+  const config = await getConfig();
 
-  const summary = getDashboardSummary(isAdmin ? undefined : (c) => caseVisibleTo(c, viewer));
-  const clients = listClients();
-  const payments = listPayments();
-  const cases = listVisibleCases(viewer);
+  const summary = await getDashboardSummary(isAdmin ? undefined : (c) => caseVisibleTo(c, viewer));
+  const clients = await listClients();
+  const payments = await listPayments();
+  const cases = await listVisibleCases(viewer);
   const clientIds = new Set(cases.map((c) => c.clientId));
-  const activity = listActivity({ limit: 40 }).filter(
+  const activity = (await listActivity({ limit: 40 })).filter(
     (entry) => isAdmin || (entry.clientId && clientIds.has(entry.clientId)),
   ).slice(0, 12);
 
@@ -108,14 +111,16 @@ export default async function DashboardPage() {
   const stageOrder = Object.keys(config.stageLabels) as CaseStage[];
 
   const priorityOrder: Record<TaskPriority, number> = { urgent: 0, high: 1, normal: 2 };
-  const openTasks = listVisibleTasks(viewer)
+  const openTaskRecords = (await listVisibleTasks(viewer))
     .filter((t) => t.status === 'open')
     .sort((a, b) => {
       if (priorityOrder[a.priority] !== priorityOrder[b.priority]) return priorityOrder[a.priority] - priorityOrder[b.priority];
       return (a.dueAt || '9999').localeCompare(b.dueAt || '9999');
     })
-    .slice(0, 6)
-    .map((t) => ({ ...t, assigneeName: assigneeContact(t.assigneeId).name }));
+    .slice(0, 6);
+  const openTasks = await Promise.all(
+    openTaskRecords.map(async (t) => ({ ...t, assigneeName: (await assigneeContact(t.assigneeId)).name })),
+  );
 
   return (
     <div>

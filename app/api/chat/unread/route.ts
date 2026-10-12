@@ -6,5 +6,5 @@ import { actorId, getViewer } from '@/lib/viewer';
 export async function GET() {
   const auth = await getViewer();
   if (!auth) return NextResponse.json({ ok: false }, { status: 401 });
-  return NextResponse.json({ ok: true, data: { unread: chatUnreadCount(actorId(auth.session)) } });
+  return NextResponse.json({ ok: true, data: { unread: await chatUnreadCount(actorId(auth.session)) } });
 }

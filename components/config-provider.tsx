@@ -1,7 +1,8 @@
 'use client';
 
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
-import { DEFAULT_APP_CONFIG, optionLabel, stageLabelOf, type AppConfig } from '@/data/domain';
+import { usePathname } from 'next/navigation';
+import { DEFAULT_APP_CONFIG, optionLabel, stageLabelOf, type AppConfig } from '@/lib/domain';
 
 type ConfigContextValue = {
   config: AppConfig;
@@ -13,19 +14,26 @@ const ConfigContext = createContext<ConfigContextValue>({ config: DEFAULT_APP_CO
 
 export function ConfigProvider({ children }: { children: ReactNode }) {
   const [config, setConfig] = useState<AppConfig>(DEFAULT_APP_CONFIG);
+  const [loaded, setLoaded] = useState(false);
+  const pathname = usePathname();
 
   const refresh = useCallback(() => {
     fetch('/api/config')
       .then((r) => r.json())
       .then((d) => {
-        if (d.ok && d.data) setConfig(d.data);
+        if (d.ok && d.data) {
+          setConfig(d.data);
+          setLoaded(true);
+        }
       })
       .catch(() => null);
   }, []);
 
+  // The login page can't read config (no session yet), so keep trying on each
+  // navigation until it loads — otherwise the default name sticks after sign-in.
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    if (!loaded) refresh();
+  }, [refresh, loaded, pathname]);
 
   return <ConfigContext.Provider value={{ config, refresh }}>{children}</ConfigContext.Provider>;
 }

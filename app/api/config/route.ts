@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import type { AppConfig } from '@/data/domain';
+import type { AppConfig } from '@/lib/domain';
 import { getConfig, saveConfig } from '@/lib/store';
 import { getViewer } from '@/lib/viewer';
 
@@ -8,7 +8,7 @@ import { getViewer } from '@/lib/viewer';
 export async function GET() {
   const auth = await getViewer();
   if (!auth) return NextResponse.json({ ok: false }, { status: 401 });
-  return NextResponse.json({ ok: true, data: getConfig() });
+  return NextResponse.json({ ok: true, data: await getConfig() });
 }
 
 /** Only the admin edits settings. */
@@ -63,6 +63,6 @@ export async function PATCH(request: NextRequest) {
     patch.stageLabels = labels;
   }
 
-  const saved = saveConfig(patch);
+  const saved = await saveConfig(patch);
   return NextResponse.json({ ok: true, data: saved });
 }

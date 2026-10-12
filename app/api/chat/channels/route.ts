@@ -13,8 +13,8 @@ export async function GET() {
     ok: true,
     data: {
       me,
-      conversations: listConversations(me),
-      members: listChatMembers().filter((m) => m.active),
+      conversations: await listConversations(me),
+      members: (await listChatMembers()).filter((m) => m.active),
     },
   });
 }
@@ -32,7 +32,7 @@ export async function POST(request: NextRequest) {
   }
   if (!body.memberId) return NextResponse.json({ ok: false, error: 'חסר מזהה משתמש' }, { status: 400 });
 
-  const channel = getOrCreateDirectChannel(actorId(auth.session), body.memberId);
+  const channel = await getOrCreateDirectChannel(actorId(auth.session), body.memberId);
   if (!channel) return NextResponse.json({ ok: false, error: 'לא ניתן לפתוח שיחה' }, { status: 400 });
   return NextResponse.json({ ok: true, data: channel }, { status: 201 });
 }

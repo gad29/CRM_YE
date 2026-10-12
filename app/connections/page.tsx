@@ -1,38 +1,29 @@
-import { env, hasAdminPassword, hasApiAccessToken, hasN8nConfig } from '@/lib/env';
+import { env, hasAdminPassword, hasResendConfig, hasWhatsAppConfig } from '@/lib/env';
+import { IntegrationTools } from '@/components/integration-tools';
 
 export const dynamic = 'force-dynamic';
-
-const EVENTS = [
-  { path: 'crmye/client-created', description: 'לקוח חדש נוצר — למשל: הוספת שורה בגוגל שיטס, הודעת ברוכים הבאים' },
-  { path: 'crmye/case-created', description: 'תיק חדש נפתח — עדכון טבלת מעקב, יומן משימות' },
-  { path: 'crmye/case-stage-changed', description: 'שלב תיק השתנה — שליחת עדכון ללקוח במייל/וואטסאפ, תזכורות' },
-  { path: 'crmye/case-trouble-flag', description: 'תיק סומן כתקוע / נדרשת השלמה — התראה מיידית' },
-  { path: 'crmye/case-decision', description: 'עודכנה החלטת המשרד (אושר / חקירה / נדחה)' },
-  { path: 'crmye/document-uploaded', description: 'מסמך הועלה — גיבוי לדרייב, עדכון סטטוס' },
-  { path: 'crmye/payment-recorded', description: 'תשלום נרשם — הפקת קבלה, עדכון גיליון הכנסות' },
-  { path: 'crmye/task-assigned', description: 'משימה הוקצתה לעובד — מייל אוטומטי לעובד' },
-  { path: 'crmye/password-reset', description: 'קוד איפוס סיסמה — נשלח באימייל / SMS / וואטסאפ לפי בחירת המשתמש' },
-  { path: 'crmye/send-document', description: 'שליחת מסמך ללקוח — קישור מאובטח באימייל / וואטסאפ / SMS (וורקפלואו 09)' },
-  { path: 'crmye/chat-message', description: 'הודעת צ׳אט שנשלחה עם התראה — מייל/וואטסאפ לחברי הצוות (וורקפלואו 10)' },
-  { path: 'crmye/meeting-request', description: 'בקשת פגישה (נשלח ידנית/מסוכן AI) — קביעת פגישה ביומן גוגל' },
-  { path: 'crmye/daily-summary', description: 'סיכום יומי (מופעל מתוזמן ב-n8n שקורא מ-GET /api/summary)' },
-];
 
 function StatusBadge({ ok, okText, missingText }: { ok: boolean; okText: string; missingText: string }) {
   return <span className={`badge ${ok ? 'good' : 'warn'}`}>{ok ? `✓ ${okText}` : `○ ${missingText}`}</span>;
 }
 
+function Env({ name }: { name: string }) {
+  return <code dir="ltr">{name}</code>;
+}
+
 export default function ConnectionsPage() {
-  const n8nConfigured = hasN8nConfig();
+  const email = hasResendConfig();
+  const whatsapp = hasWhatsAppConfig();
+  const webhookUrl = `${env.appBaseUrl}/api/webhooks/whatsapp`;
 
   return (
     <div>
       <div className="hero">
         <div>
-          <p className="eyebrow">חיבורים ואוטומציה</p>
-          <h1 style={{ margin: '6px 0 4px' }}>n8n ואינטגרציות</h1>
+          <p className="eyebrow">חיבורים</p>
+          <h1 style={{ margin: '6px 0 4px' }}>אימייל, וואטסאפ ותזכורות</h1>
           <p className="muted" style={{ margin: 0 }}>
-            כל אירוע במערכת נשלח אוטומטית ל-n8n, ומשם אפשר לחבר גוגל שיטס, יומן גוגל, מיילים, וואטסאפ ועוד.
+            המערכת שולחת בעצמה: אימיילים דרך Resend והודעות וואטסאפ דרך Meta. המפתחות נשמרים בקובץ ההגדרות של השרת בלבד.
           </p>
         </div>
       </div>
@@ -40,25 +31,39 @@ export default function ConnectionsPage() {
       <div className="connection-grid" style={{ marginBottom: 20 }}>
         <div className="connection-card">
           <div className="split connection-topline">
-            <strong>חיבור n8n</strong>
-            <StatusBadge ok={n8nConfigured} okText="מחובר" missingText="לא מוגדר" />
+            <strong>אימייל (Resend)</strong>
+            <StatusBadge ok={email} okText="מחובר" missingText="לא מוגדר" />
           </div>
           <p className="connection-value" dir="ltr" style={{ fontSize: 14 }}>
-            {env.n8nWebhookBaseUrl || 'N8N_WEBHOOK_BASE_URL not set'}
+            {env.emailFrom || 'EMAIL_FROM not set'}
           </p>
           <p className="muted" style={{ margin: 0, fontSize: 13 }}>
-            הגדר את N8N_WEBHOOK_BASE_URL בקובץ ‎.env.local (למשל https://n8n.example.com/webhook).
+            נדרש: <Env name="RESEND_API_KEY" /> ו-<Env name="EMAIL_FROM" /> מדומיין שאומת ב-Resend.
           </p>
         </div>
 
         <div className="connection-card">
           <div className="split connection-topline">
-            <strong>טוקן API ל-n8n</strong>
-            <StatusBadge ok={hasApiAccessToken()} okText="מוגדר" missingText="לא מוגדר" />
+            <strong>וואטסאפ (Meta Cloud API)</strong>
+            <StatusBadge ok={whatsapp} okText="מחובר" missingText="לא מוגדר" />
+          </div>
+          <p className="connection-value" dir="ltr" style={{ fontSize: 14 }}>
+            {env.whatsappPhoneNumberId ? `Phone number ID ${env.whatsappPhoneNumberId}` : 'WHATSAPP_PHONE_NUMBER_ID not set'}
+          </p>
+          <p className="muted" style={{ margin: 0, fontSize: 13 }}>
+            נדרש: <Env name="WHATSAPP_ACCESS_TOKEN" /> ו-<Env name="WHATSAPP_PHONE_NUMBER_ID" />. כל הודעה יוצאת דרך תבנית שאושרה ב-Meta
+            (שפה: <Env name={env.whatsappTemplateLang} />).
+          </p>
+        </div>
+
+        <div className="connection-card">
+          <div className="split connection-topline">
+            <strong>תזכורות משימות</strong>
+            <StatusBadge ok={email || whatsapp} okText="פעיל" missingText="אין ערוץ שליחה" />
           </div>
           <p className="muted" style={{ margin: 0, fontSize: 13 }}>
-            CRMYE_API_TOKEN מאפשר ל-n8n לקרוא נתונים מהמערכת (למשל GET /api/summary לסיכום יומי לגיליון)
-            באמצעות הכותרת <code dir="ltr">x-crmye-api-key</code>.
+            המערכת בודקת כל דקה אילו תזכורות הגיע זמנן ושולחת כל תזכורת פעם אחת בדיוק, בערוצים שנבחרו במשימה. אם השליחה נכשלת — עד 3
+            ניסיונות.
           </p>
         </div>
 
@@ -68,57 +73,47 @@ export default function ConnectionsPage() {
             <StatusBadge ok={hasAdminPassword()} okText="סיסמה מוגדרת" missingText="ללא סיסמה!" />
           </div>
           <p className="muted" style={{ margin: 0, fontSize: 13 }}>
-            הגדר ADMIN_PASSWORD (או ADMIN_PASSWORD_HASH) לפני חשיפת המערכת לאינטרנט.
-          </p>
-        </div>
-
-        <div className="connection-card">
-          <div className="split connection-topline">
-            <strong>אחסון מסמכים</strong>
-            <span className="badge good">✓ מקומי</span>
-          </div>
-          <p className="muted" style={{ margin: 0, fontSize: 13 }}>
-            לכל לקוח תיקייה פיזית תחת <code dir="ltr">data/clients/&lt;client-id&gt;/documents</code> עם כל המסמכים שלו.
+            הכניסה מוגנת מפני ניחוש סיסמאות (נעילה זמנית אחרי ניסיונות שגויים), וכל התחברות נשמרת בשרת — השבתת עובד או החלפת סיסמה
+            מנתקת אותו מיד.
           </p>
         </div>
       </div>
 
-      <div className="card">
-        <h3 style={{ marginTop: 0 }}>אירועי Webhook שנשלחים ל-n8n</h3>
+      <div className="card" style={{ marginBottom: 20 }}>
+        <h3 style={{ marginTop: 0 }}>תבניות וואטסאפ</h3>
         <p className="muted" style={{ fontSize: 13 }}>
-          כל אירוע נשלח כ-POST אל <code dir="ltr">{'{N8N_WEBHOOK_BASE_URL}/<path>'}</code>. חבילת ורקפלואו מוכנה לייבוא נמצאת בתיקיית <code dir="ltr">n8n/workflows</code> בפרויקט.
+          Meta מאפשרת לעסק לפתוח שיחה רק באמצעות תבניות מאושרות מראש. אלה שמות התבניות שהמערכת משתמשת בהן — יש ליצור אותן ב-WhatsApp
+          Manager בדיוק בשמות האלה (הנוסח המלא נמצא ב-<Env name="docs/WHATSAPP-SETUP.md" />).
         </p>
         <table className="table">
           <thead>
             <tr>
-              <th>נתיב</th>
-              <th>מתי נשלח</th>
+              <th>שימוש</th>
+              <th>שם תבנית</th>
             </tr>
           </thead>
           <tbody>
-            {EVENTS.map((event) => (
-              <tr key={event.path}>
-                <td dir="ltr" style={{ fontFamily: 'ui-monospace, monospace', fontSize: 13 }}>{event.path}</td>
-                <td style={{ fontSize: 13 }}>{event.description}</td>
+            {[
+              ['קוד איפוס סיסמה (Authentication)', env.whatsappTemplates.otp],
+              ['קישור למסמכים ללקוח', env.whatsappTemplates.documents],
+              ['תזכורת משימה', env.whatsappTemplates.reminder],
+              ['משימה חדשה שויכה', env.whatsappTemplates.taskAssigned],
+              ['התראה על הודעת צ׳אט', env.whatsappTemplates.chat],
+            ].map(([use, name]) => (
+              <tr key={name}>
+                <td style={{ fontSize: 13 }}>{use}</td>
+                <td dir="ltr" style={{ fontFamily: 'ui-monospace, monospace', fontSize: 13 }}>{name}</td>
               </tr>
             ))}
           </tbody>
         </table>
-      </div>
-
-      <div className="card" style={{ marginTop: 20 }}>
-        <h3 style={{ marginTop: 0 }}>נקודות API לשימוש n8n</h3>
-        <ul className="list" style={{ fontSize: 13 }}>
-          <li><code dir="ltr">GET /api/summary</code> — סיכום מלא: כל התיקים, שלבים, חובות ותשלומים (לסנכרון לגוגל שיטס).</li>
-          <li><code dir="ltr">GET /api/tasks/due?markSent=1</code> — תזכורות משימות שהגיע זמנן, כולל פרטי קשר וערוצי שליחה (וורקפלואו 06 בודק כל 10 דקות).</li>
-          <li><code dir="ltr">GET /api/clients</code> — רשימת לקוחות.</li>
-          <li><code dir="ltr">GET /api/cases</code> — רשימת תיקים כולל סטטוס כספי.</li>
-          <li><code dir="ltr">POST /api/webhooks/n8n</code> — שליחת אירוע מותאם אישית ל-n8n מתוך המערכת.</li>
-        </ul>
-        <p className="muted" style={{ fontSize: 13 }}>
-          יש לצרף לכל קריאה את הכותרת <code dir="ltr">x-crmye-api-key: {'<CRMYE_API_TOKEN>'}</code>.
+        <p className="muted" style={{ fontSize: 13, marginBottom: 0 }}>
+          כתובת Webhook לעדכוני מסירה (Meta → Configuration → Webhook): <code dir="ltr">{webhookUrl}</code>, עם ה-Verify token שהוגדר
+          ב-<Env name="WHATSAPP_VERIFY_TOKEN" />.
         </p>
       </div>
+
+      <IntegrationTools emailReady={email} whatsappReady={whatsapp} />
     </div>
   );
 }

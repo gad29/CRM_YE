@@ -9,16 +9,16 @@ export async function DELETE(_request: NextRequest, { params }: { params: Promis
   if (!auth) return NextResponse.json({ ok: false }, { status: 401 });
 
   const { messageId } = await params;
-  const message = getChatMessage(messageId);
+  const message = await getChatMessage(messageId);
   if (!message) return NextResponse.json({ ok: false, error: 'ההודעה לא נמצאה' }, { status: 404 });
 
   const me = actorId(auth.session);
-  const channel = getChannel(message.channelId);
+  const channel = await getChannel(message.channelId);
   if (!channel || !canAccessChannel(channel, me)) {
     return NextResponse.json({ ok: false, error: 'ההודעה לא נמצאה' }, { status: 404 });
   }
 
-  const deleted = deleteChatMessage(messageId, me, auth.viewer.role === 'admin');
+  const deleted = await deleteChatMessage(messageId, me, auth.viewer.role === 'admin');
   if (!deleted) return NextResponse.json({ ok: false, error: 'אין הרשאה למחוק הודעה זו' }, { status: 403 });
   return NextResponse.json({ ok: true });
 }

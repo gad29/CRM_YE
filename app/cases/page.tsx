@@ -16,7 +16,7 @@ import {
   type GovernmentOffice,
   type InvestigationOutcome,
   type OperatingCompany,
-} from '@/data/domain';
+} from '@/lib/domain';
 import { useConfig } from '@/components/config-provider';
 
 type CaseRow = {

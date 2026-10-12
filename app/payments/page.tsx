@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
-import { optionLabel, PAYMENT_STATUS_LABELS, stageLabelOf, type CaseStage, type PaymentMethod } from '@/data/domain';
+import { optionLabel, PAYMENT_STATUS_LABELS, stageLabelOf, type CaseStage, type PaymentMethod } from '@/lib/domain';
 import { useConfig } from '@/components/config-provider';
 
 type CaseRow = {

@@ -8,8 +8,9 @@ import {
   type CaseKind,
   type CaseStage,
   type OperatingCompany,
-} from '@/data/domain';
+} from '@/lib/domain';
 import { createCase, createClient, createPayment, updateCase } from '@/lib/store';
+import { requireAdmin } from '@/lib/viewer';
 
 export interface ImportRow {
   fullName: string;
@@ -57,8 +58,10 @@ function resolveStage(raw?: string): CaseStage {
   return 'collecting-documents';
 }
 
-/** Admin-only (enforced by middleware). Bulk-imports old clients + their cases. */
+/** Admin-only. Bulk-imports old clients + their cases. */
 export async function POST(request: NextRequest) {
+  const guard = await requireAdmin();
+  if (guard instanceof NextResponse) return guard;
   let body: { rows?: ImportRow[] };
   try {
     body = await request.json();
@@ -83,7 +86,7 @@ export async function POST(request: NextRequest) {
       continue;
     }
 
-    const client = createClient({
+    const client = await createClient({
       fullName,
       phone: phone || '—',
       idNumber: row.idNumber,
@@ -95,7 +98,7 @@ export async function POST(request: NextRequest) {
     });
     clientsCreated += 1;
 
-    const caseRecord = createCase({
+    const caseRecord = await createCase({
       clientId: client.id,
       title: (row.caseTitle || '').trim() || 'סיוע בשכר דירה',
       office: 'housing-ministry',
@@ -113,11 +116,11 @@ export async function POST(request: NextRequest) {
 
     const stage = resolveStage(row.stage);
     if (stage !== caseRecord.stage || row.trouble) {
-      updateCase(caseRecord.id, { stage, troubleFlag: Boolean(row.trouble) });
+      await updateCase(caseRecord.id, { stage, troubleFlag: Boolean(row.trouble) });
     }
 
     if (Number.isFinite(row.paid) && Number(row.paid) > 0) {
-      const payment = createPayment({
+      const payment = await createPayment({
         clientId: client.id,
         caseId: caseRecord.id,
         amount: Number(row.paid),

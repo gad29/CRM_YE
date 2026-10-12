@@ -1,15 +1,26 @@
-// Edge-safe session helpers (imported by middleware — keep free of Node-only deps).
-// One signed cookie serves both the admin and worker logins; `scope` tells them apart.
+// Session cookie ↔ server-side session (Node runtime: route handlers and server pages).
+// One cookie serves admins and workers; `scope` tells them apart.
+//
+// The cookie (lib/session-token.ts) carries a signed session id + scope; the
+// session row in PostgreSQL is what actually grants access, so sign-out,
+// deactivation and password changes take effect on the very next request.
+import crypto from 'node:crypto';
 import { cookies } from 'next/headers';
 import type { NextRequest } from 'next/server';
-import { env, hasAdminPassword, isProductionLike } from '@/lib/env';
+import { env, isProductionLike } from '@/lib/env';
+import { SESSION_COOKIE, signSessionToken, verifySessionToken } from '@/lib/session-token';
+import { createSession, findActiveSession, revokeSession, type SessionScope } from '@/lib/sessions';
 
-export const ADMIN_AUTH_COOKIE = 'crmye-admin-session';
+export { signingSecret } from '@/lib/session-token';
+
+export const ADMIN_AUTH_COOKIE = SESSION_COOKIE;
 const DEFAULT_SESSION_HOURS = 24;
-const encoder = new TextEncoder();
 
 export type SessionPayload = {
-  scope: 'admin' | 'worker';
+  sid: string;
+  scope: SessionScope;
+  /** 'admin' (root), ADM-x or WRK-x. */
+  accountId: string;
   email?: string;
   /** Set when scope === 'worker'. */
   workerId?: string;
@@ -17,98 +28,65 @@ export type SessionPayload = {
   expiresAt: string;
 };
 
-function base64url(input: string) {
-  return Buffer.from(input, 'utf8').toString('base64url');
-}
-
-function decodeBase64url(input: string) {
-  return Buffer.from(input, 'base64url').toString('utf8');
-}
-
-function getSessionSecret() {
-  return env.adminSessionSecret || env.adminPasswordHash || env.adminPassword || 'crmye-admin-change-me';
-}
-
-async function signPayload(encodedPayload: string) {
-  const key = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(getSessionSecret()),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  );
-  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(encodedPayload));
-  return Buffer.from(signature).toString('base64url');
-}
-
-function constantTimeEqual(a: string, b: string) {
-  if (a.length !== b.length) return false;
-  let mismatch = 0;
-  for (let i = 0; i < a.length; i += 1) mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return mismatch === 0;
-}
-
 function getSessionHours() {
   const parsed = Number(env.adminSessionHours || DEFAULT_SESSION_HOURS);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SESSION_HOURS;
 }
 
-/** True when an admin password is configured. When false (fresh local setup), login is not enforced. */
-export function isAdminAuthEnabled() {
-  return hasAdminPassword();
+/** Fingerprint of the root admin's .env credential — rotating it ends root sessions. */
+function rootCredentialTag() {
+  const credential = env.adminPasswordHash || env.adminPassword || '';
+  return crypto.createHash('sha256').update(`crmye-root:${credential}`).digest('hex').slice(0, 24);
 }
 
-export async function createSessionToken(input: Omit<SessionPayload, 'expiresAt'>) {
-  const payload: SessionPayload = {
-    ...input,
-    expiresAt: new Date(Date.now() + getSessionHours() * 60 * 60 * 1000).toISOString(),
+async function resolveToken(token: string | undefined | null): Promise<SessionPayload | null> {
+  const verified = await verifySessionToken(token);
+  if (!verified) return null;
+  const session = await findActiveSession(verified.sid);
+  if (!session || session.scope !== verified.scope) return null;
+  if (session.accountId === 'admin' && session.credentialTag !== rootCredentialTag()) return null;
+  return {
+    sid: session.id,
+    scope: session.scope,
+    accountId: session.accountId,
+    email: session.email,
+    workerId: session.scope === 'worker' ? session.accountId : undefined,
+    name: session.name,
+    expiresAt: session.expiresAt,
   };
-  const encodedPayload = base64url(JSON.stringify(payload));
-  const signature = await signPayload(encodedPayload);
-  return `${encodedPayload}.${signature}`;
 }
 
-export async function parseSessionToken(token: string | undefined | null): Promise<SessionPayload | null> {
-  if (!token) return null;
-  const [encodedPayload, signature] = token.split('.');
-  if (!encodedPayload || !signature) return null;
-  const expectedSignature = await signPayload(encodedPayload);
-  if (!constantTimeEqual(signature, expectedSignature)) return null;
-  try {
-    const payload = JSON.parse(decodeBase64url(encodedPayload)) as SessionPayload;
-    if ((payload.scope !== 'admin' && payload.scope !== 'worker') || !payload.expiresAt) return null;
-    if (payload.scope === 'worker' && !payload.workerId) return null;
-    if (new Date(payload.expiresAt).getTime() < Date.now()) return null;
-    return payload;
-  } catch {
-    return null;
-  }
+/** Start a session and return the cookie value to set. */
+export async function startSession(input: {
+  scope: SessionScope;
+  accountId: string;
+  email?: string;
+  name?: string;
+  ip?: string;
+  userAgent?: string;
+}) {
+  const session = await createSession({
+    ...input,
+    hours: getSessionHours(),
+    credentialTag: input.accountId === 'admin' ? rootCredentialTag() : undefined,
+  });
+  return signSessionToken(session.id, session.scope);
 }
 
-/** Session for the current request; falls back to an implicit admin session when no password is configured. */
+/** Revoke the session behind a cookie value (sign-out). */
+export async function endSession(token: string | undefined | null) {
+  const verified = await verifySessionToken(token);
+  if (verified) await revokeSession(verified.sid);
+}
+
 export async function getSessionFromRequest(request: NextRequest): Promise<SessionPayload | null> {
-  const parsed = await parseSessionToken(request.cookies.get(ADMIN_AUTH_COOKIE)?.value);
-  if (parsed) return parsed;
-  if (!isAdminAuthEnabled()) {
-    return { scope: 'admin', email: env.adminEmail, expiresAt: new Date(Date.now() + 60_000).toISOString() };
-  }
-  return null;
+  return resolveToken(request.cookies.get(ADMIN_AUTH_COOKIE)?.value);
 }
 
 /** Session in a server component / route handler context (reads cookies()). */
 export async function getCurrentSession(): Promise<SessionPayload | null> {
   const cookieStore = await cookies();
-  const parsed = await parseSessionToken(cookieStore.get(ADMIN_AUTH_COOKIE)?.value);
-  if (parsed) return parsed;
-  if (!isAdminAuthEnabled()) {
-    return { scope: 'admin', email: env.adminEmail, expiresAt: new Date(Date.now() + 60_000).toISOString() };
-  }
-  return null;
-}
-
-export async function requestHasAdminSession(request: NextRequest) {
-  const session = await getSessionFromRequest(request);
-  return Boolean(session);
+  return resolveToken(cookieStore.get(ADMIN_AUTH_COOKIE)?.value);
 }
 
 export function adminCookieOptions() {

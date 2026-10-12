@@ -6,7 +6,7 @@ import {
   type CaseKind,
   type GovernmentOffice,
   type OperatingCompany,
-} from '@/data/domain';
+} from '@/lib/domain';
 import { createCase, getCaseFinance, listClients, listPayments, listVisibleCases, listWorkers } from '@/lib/store';
 import { actorId, getViewer } from '@/lib/viewer';
 
@@ -14,10 +14,10 @@ export async function GET() {
   const auth = await getViewer();
   if (!auth) return NextResponse.json({ ok: false }, { status: 401 });
 
-  const cases = listVisibleCases(auth.viewer);
-  const clients = listClients();
-  const payments = listPayments();
-  const workers = listWorkers();
+  const cases = await listVisibleCases(auth.viewer);
+  const clients = await listClients();
+  const payments = await listPayments();
+  const workers = await listWorkers();
 
   function workerName(id?: string) {
     if (!id || id === 'admin') return '';
@@ -68,7 +68,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ ok: false, error: 'לקוח וכותרת תיק הם שדות חובה' }, { status: 400 });
   }
 
-  const record = createCase({
+  const record = await createCase({
     clientId: body.clientId,
     title: body.title,
     office: body.office || 'housing-ministry',

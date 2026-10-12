@@ -22,7 +22,7 @@ import {
   type InvestigationOutcome,
   type OperatingCompany,
   type PaymentMethod,
-} from '@/data/domain';
+} from '@/lib/domain';
 import { useConfig } from '@/components/config-provider';
 
 type CaseDetail = {

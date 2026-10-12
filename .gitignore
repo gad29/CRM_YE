@@ -5,9 +5,11 @@ node_modules
 !.env.example
 .env.local
 .env.*.local
+.env.production
 tsconfig.tsbuildinfo
 public/pdf.worker.min.mjs
 
-# Local database + client document folders (user data — back up separately)
-data/db/
-data/clients/
+# User data — client documents, chat files, templates, the old JSON store.
+# Never commit it; back it up instead (scripts/backup.sh).
+data/
+backups/

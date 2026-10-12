@@ -1,8 +1,8 @@
 // Team chat: public channel + private 1:1 conversations, with attachments,
-// voice notes and reminders. Stored as JSON + files, like the rest of the CRM.
+// voice notes and reminders. Messages live in PostgreSQL; attachment files
+// stay on disk under DATA_DIR/chat/<channelId>/.
 import fs from 'node:fs';
 import path from 'node:path';
-import crypto from 'node:crypto';
 import {
   PUBLIC_CHANNEL_ID,
   type ChatAttachment,
@@ -11,20 +11,15 @@ import {
   type ChatMember,
   type ChatMessage,
   type ReminderChannel,
-} from '@/data/domain';
+} from '@/lib/domain';
+import { afterCommit, iso, isoOpt, opt, sql, sqlOne, transaction } from '@/lib/db';
 import { env } from '@/lib/env';
-import {
-  createTask,
-  dataRoot,
-  dbFile,
-  fireEvent,
-  getConfig,
-  listAdmins,
-  listWorkers,
-  nextId,
-  readJson,
-  writeJson,
-} from '@/lib/store';
+import { chatMessageNotice } from '@/lib/messages';
+import { deliver, directChannelAvailable } from '@/lib/notify';
+import { createTask, dataRoot, getConfig, listAdmins, listWorkers, nextId, safeSegment } from '@/lib/store';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Row = Record<string, any>;
 
 const ROOT_ADMIN_ID = 'admin';
 
@@ -33,13 +28,13 @@ function nowIso() {
 }
 
 function channelFolder(channelId: string) {
-  return path.join(dataRoot(), 'chat', channelId);
+  return path.join(dataRoot(), 'chat', safeSegment(channelId));
 }
 
 // ── Members ──────────────────────────────────────────────────────────────────
 
 /** Everyone who can take part in the chat: the root admin, extra admins, workers. */
-export function listChatMembers(): ChatMember[] {
+export async function listChatMembers(): Promise<ChatMember[]> {
   const rootAdmin: ChatMember = {
     id: ROOT_ADMIN_ID,
     name: 'מנהל ראשי',
@@ -48,55 +43,44 @@ export function listChatMembers(): ChatMember[] {
     phone: env.adminPhone || undefined,
     active: true,
   };
-  const admins: ChatMember[] = listAdmins().map((a) => ({
-    id: a.id,
-    name: a.name,
-    role: 'admin',
-    email: a.email,
-    phone: a.phone,
-    active: a.active,
-  }));
-  const workers: ChatMember[] = listWorkers().map((w) => ({
-    id: w.id,
-    name: w.name,
-    role: 'worker',
-    email: w.email,
-    phone: w.phone,
-    active: w.active,
-  }));
-  return [rootAdmin, ...admins, ...workers];
+  const [admins, workers] = await Promise.all([listAdmins(), listWorkers()]);
+  return [
+    rootAdmin,
+    ...admins.map((a): ChatMember => ({ id: a.id, name: a.name, role: 'admin', email: a.email, phone: a.phone, active: a.active })),
+    ...workers.map((w): ChatMember => ({ id: w.id, name: w.name, role: 'worker', email: w.email, phone: w.phone, active: w.active })),
+  ];
 }
 
-export function getChatMember(id: string) {
-  return listChatMembers().find((m) => m.id === id);
+export async function getChatMember(id: string) {
+  return (await listChatMembers()).find((m) => m.id === id);
 }
 
 // ── Channels ─────────────────────────────────────────────────────────────────
 
-function listChannelsRaw(): ChatChannel[] {
-  return readJson<ChatChannel[]>(dbFile('chat-channels'), []);
+function toChannel(row: Row): ChatChannel {
+  return {
+    id: row.id,
+    kind: row.kind,
+    name: row.name,
+    memberIds: row.member_ids ?? [],
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+  };
 }
 
-function saveChannels(channels: ChatChannel[]) {
-  writeJson(dbFile('chat-channels'), channels);
+async function listChannelsRaw(): Promise<ChatChannel[]> {
+  return (await sql('SELECT * FROM chat_channels ORDER BY created_at DESC, id')).map(toChannel);
 }
 
 /** The team-wide channel everyone can read and post in. */
-export function ensurePublicChannel(): ChatChannel {
-  const channels = listChannelsRaw();
-  const existing = channels.find((c) => c.id === PUBLIC_CHANNEL_ID);
-  if (existing) return existing;
-
-  const channel: ChatChannel = {
-    id: PUBLIC_CHANNEL_ID,
-    kind: 'public',
-    name: 'צוות — כללי',
-    memberIds: [],
-    createdAt: nowIso(),
-    updatedAt: nowIso(),
-  };
-  saveChannels([channel, ...channels]);
-  return channel;
+export async function ensurePublicChannel(): Promise<ChatChannel> {
+  await sql(
+    `INSERT INTO chat_channels (id, kind, name, member_ids, created_at, updated_at)
+     VALUES ($1, 'public', 'צוות — כללי', '{}', $2, $2)
+     ON CONFLICT (id) DO NOTHING`,
+    [PUBLIC_CHANNEL_ID, nowIso()],
+  );
+  return toChannel((await sqlOne('SELECT * FROM chat_channels WHERE id = $1', [PUBLIC_CHANNEL_ID]))!);
 }
 
 /** Stable id for a 1:1 conversation, independent of who opened it. */
@@ -104,30 +88,25 @@ export function directChannelId(a: string, b: string) {
   return `dm-${[a, b].sort().join('--')}`;
 }
 
-export function getOrCreateDirectChannel(a: string, b: string): ChatChannel | undefined {
+export async function getOrCreateDirectChannel(a: string, b: string): Promise<ChatChannel | undefined> {
   if (a === b) return undefined;
-  if (!getChatMember(a) || !getChatMember(b)) return undefined;
+  if (!(await getChatMember(a)) || !(await getChatMember(b))) return undefined;
 
   const id = directChannelId(a, b);
-  const channels = listChannelsRaw();
-  const existing = channels.find((c) => c.id === id);
-  if (existing) return existing;
-
-  const channel: ChatChannel = {
-    id,
-    kind: 'direct',
-    name: '',
-    memberIds: [a, b].sort(),
-    createdAt: nowIso(),
-    updatedAt: nowIso(),
-  };
-  saveChannels([channel, ...channels]);
-  return channel;
+  await sql(
+    `INSERT INTO chat_channels (id, kind, name, member_ids, created_at, updated_at)
+     VALUES ($1, 'direct', '', $2, $3, $3)
+     ON CONFLICT (id) DO NOTHING`,
+    [id, [a, b].sort(), nowIso()],
+  );
+  const row = await sqlOne('SELECT * FROM chat_channels WHERE id = $1', [id]);
+  return row ? toChannel(row) : undefined;
 }
 
-export function getChannel(channelId: string) {
+export async function getChannel(channelId: string) {
   if (channelId === PUBLIC_CHANNEL_ID) return ensurePublicChannel();
-  return listChannelsRaw().find((c) => c.id === channelId);
+  const row = await sqlOne('SELECT * FROM chat_channels WHERE id = $1', [channelId]);
+  return row ? toChannel(row) : undefined;
 }
 
 /** Public channels are open to everyone; DMs only to their two members. */
@@ -141,8 +120,8 @@ export function canAccessChannel(channel: ChatChannel, memberId: string) {
  * The conversation list offers a DM with every teammate before any message
  * exists, so the first send/open must materialize that channel.
  */
-export function resolveChannelForMember(channelId: string, memberId: string): ChatChannel | undefined {
-  const existing = getChannel(channelId);
+export async function resolveChannelForMember(channelId: string, memberId: string): Promise<ChatChannel | undefined> {
+  const existing = await getChannel(channelId);
   if (existing) return canAccessChannel(existing, memberId) ? existing : undefined;
 
   const match = /^dm-(.+)--(.+)$/.exec(channelId);
@@ -150,7 +129,7 @@ export function resolveChannelForMember(channelId: string, memberId: string): Ch
   const [, a, b] = match;
   if (a !== memberId && b !== memberId) return undefined;
   // Guard against a tampered id: both sides must be real members.
-  if (!getChatMember(a) || !getChatMember(b)) return undefined;
+  if (!(await getChatMember(a)) || !(await getChatMember(b))) return undefined;
   if (directChannelId(a, b) !== channelId) return undefined;
 
   return getOrCreateDirectChannel(a, b);
@@ -158,30 +137,57 @@ export function resolveChannelForMember(channelId: string, memberId: string): Ch
 
 // ── Messages ─────────────────────────────────────────────────────────────────
 
-function listMessagesRaw(): ChatMessage[] {
-  return readJson<ChatMessage[]>(dbFile('chat-messages'), []);
+function toMessage(row: Row): ChatMessage {
+  return {
+    id: row.id,
+    channelId: row.channel_id,
+    authorId: row.author_id,
+    authorName: row.author_name,
+    body: opt(row.body),
+    attachments: (row.attachments ?? []) as ChatAttachment[],
+    reminderTaskId: opt(row.reminder_task_id),
+    reminderAt: isoOpt(row.reminder_at),
+    reminderChannels: opt(row.reminder_channels) as ReminderChannel[] | undefined,
+    readBy: row.read_by ?? [],
+    createdAt: iso(row.created_at),
+    deletedAt: isoOpt(row.deleted_at),
+  };
 }
 
-function saveMessages(messages: ChatMessage[]) {
-  writeJson(dbFile('chat-messages'), messages);
-}
+const MESSAGE_ORDER = 'ORDER BY created_at, length(id), id';
 
 /** Messages of a channel oldest→newest; `afterId` returns only newer ones (polling). */
-export function listChannelMessages(channelId: string, options?: { afterId?: string; limit?: number }) {
-  const all = listMessagesRaw()
-    .filter((m) => m.channelId === channelId)
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-
+export async function listChannelMessages(channelId: string, options?: { afterId?: string; limit?: number }) {
   if (options?.afterId) {
-    const index = all.findIndex((m) => m.id === options.afterId);
-    if (index !== -1) return all.slice(index + 1);
+    const anchor = await sqlOne('SELECT created_at, id FROM chat_messages WHERE id = $1 AND channel_id = $2', [
+      options.afterId,
+      channelId,
+    ]);
+    if (anchor) {
+      const rows = await sql(
+        `SELECT * FROM chat_messages
+          WHERE channel_id = $1
+            AND (created_at, length(id), id) > ($2::timestamptz, length($3::text), $3::text)
+          ${MESSAGE_ORDER}`,
+        [channelId, anchor.created_at, anchor.id],
+      );
+      return rows.map(toMessage);
+    }
   }
   const limit = options?.limit ?? 200;
-  return all.slice(-limit);
+  const rows = await sql(
+    `SELECT * FROM (
+       SELECT * FROM chat_messages WHERE channel_id = $1
+        ORDER BY created_at DESC, length(id) DESC, id DESC LIMIT $2
+     ) newest ${MESSAGE_ORDER}`,
+    [channelId, limit],
+  );
+  return rows.map(toMessage);
 }
 
-export function getChatMessage(messageId: string) {
-  return listMessagesRaw().find((m) => m.id === messageId);
+export async function getChatMessage(messageId: string) {
+  const row = await sqlOne('SELECT * FROM chat_messages WHERE id = $1', [messageId]);
+  return row ? toMessage(row) : undefined;
 }
 
 export interface PostMessageInput {
@@ -208,9 +214,10 @@ function sanitizeFileName(name: string) {
 }
 
 export async function postChatMessage(input: PostMessageInput): Promise<ChatMessage | undefined> {
-  const channel = getChannel(input.channelId);
+  const channel = await getChannel(input.channelId);
   if (!channel) return undefined;
-  const author = getChatMember(input.authorId);
+  const members = await listChatMembers();
+  const author = members.find((m) => m.id === input.authorId);
   if (!author) return undefined;
   if (!canAccessChannel(channel, input.authorId)) return undefined;
 
@@ -218,8 +225,9 @@ export async function postChatMessage(input: PostMessageInput): Promise<ChatMess
   const files = input.files ?? [];
   if (!body && !files.length) return undefined;
 
-  const id = nextId('MSG', 'chatMessage');
+  const id = await nextId('MSG', 'chatMessage');
   const attachments: ChatAttachment[] = [];
+  const written: string[] = [];
   if (files.length) {
     const folder = channelFolder(channel.id);
     fs.mkdirSync(folder, { recursive: true });
@@ -227,7 +235,9 @@ export async function postChatMessage(input: PostMessageInput): Promise<ChatMess
       const kind = attachmentKindFor(file.mimeType, file.kind);
       const safeName = sanitizeFileName(file.originalName || (kind === 'voice' ? 'voice.webm' : 'file'));
       const fileName = `${id}-${index}-${safeName}`;
-      fs.writeFileSync(path.join(folder, fileName), file.buffer);
+      const filePath = path.join(folder, fileName);
+      fs.writeFileSync(filePath, file.buffer);
+      written.push(filePath);
       attachments.push({
         id: `${id}-${index}`,
         fileName,
@@ -251,12 +261,12 @@ export async function postChatMessage(input: PostMessageInput): Promise<ChatMess
     createdAt: nowIso(),
   };
 
-  // A reminder rides along as a real task, so it is delivered by the existing
-  // reminder workflow (email / WhatsApp) at the requested time.
+  // A reminder rides along as a real task, so the reminder scheduler delivers
+  // it (email / WhatsApp) at the requested time.
   if (input.reminder?.at) {
-    const recipients = channelRecipients(channel, author.id);
+    const recipients = channelRecipients(channel, author.id, members);
     const assignee = recipients[0] ?? author.id;
-    const task = createTask({
+    const task = await createTask({
       title: body || 'תזכורת מהצ׳אט',
       notes: `נשלח בצ׳אט מ${author.name}`,
       dueAt: input.reminder.at,
@@ -268,94 +278,124 @@ export async function postChatMessage(input: PostMessageInput): Promise<ChatMess
     });
     if (task) {
       message.reminderTaskId = task.id;
-      message.reminderAt = input.reminder.at;
-      message.reminderChannels = input.reminder.channels ?? [];
+      message.reminderAt = task.remindAt;
+      message.reminderChannels = task.reminderChannels;
     }
   }
 
-  const messages = listMessagesRaw();
-  messages.push(message);
-  saveMessages(messages);
-
-  // Bump the channel so conversations sort by latest activity.
-  const channels = listChannelsRaw();
-  const index = channels.findIndex((c) => c.id === channel.id);
-  if (index !== -1) {
-    channels[index].updatedAt = message.createdAt;
-    saveChannels(channels);
+  try {
+    await transaction(async () => {
+      await sql(
+        `INSERT INTO chat_messages (id, channel_id, author_id, author_name, body, attachments, reminder_task_id,
+                                    reminder_at, reminder_channels, read_by, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        [
+          message.id,
+          message.channelId,
+          message.authorId,
+          message.authorName,
+          message.body ?? null,
+          JSON.stringify(message.attachments),
+          message.reminderTaskId ?? null,
+          message.reminderAt ?? null,
+          message.reminderChannels ?? null,
+          message.readBy,
+          message.createdAt,
+        ],
+      );
+      // Bump the channel so conversations sort by latest activity.
+      await sql('UPDATE chat_channels SET updated_at = $2 WHERE id = $1', [channel.id, message.createdAt]);
+    });
+  } catch (error) {
+    for (const filePath of written) fs.rmSync(filePath, { force: true });
+    throw error;
   }
 
   if (input.notify) {
-    const recipients = channelRecipients(channel, author.id)
-      .map((id) => getChatMember(id))
-      .filter((m): m is ChatMember => Boolean(m));
-    void fireEvent('chat-message', {
-      messageId: message.id,
-      channelId: channel.id,
-      channelName: channel.kind === 'public' ? channel.name : 'הודעה פרטית',
-      authorName: author.name,
-      body: body || (attachments.length ? `${attachments.length} קבצים` : ''),
-      hasAttachments: attachments.length > 0,
-      businessName: getConfig().businessName,
-      link: `${env.appBaseUrl.replace(/\/$/, '')}/chat?channel=${encodeURIComponent(channel.id)}`,
-      recipients: recipients.map((r) => ({ name: r.name, email: r.email || '', phone: r.phone || '' })),
-    });
+    void notifyRecipients(channel, author, message, members);
   }
 
   return message;
 }
 
+/** Email / WhatsApp ping to everyone else in the conversation. */
+async function notifyRecipients(channel: ChatChannel, author: ChatMember, message: ChatMessage, members: ChatMember[]) {
+  const channels = (['email', 'whatsapp'] as const).filter((c) => directChannelAvailable(c));
+  if (!channels.length) return;
+  const { businessName } = await getConfig();
+  const preview = message.body || (message.attachments.length ? `${message.attachments.length} קבצים` : '');
+  const link = `${env.appBaseUrl}/chat?channel=${encodeURIComponent(channel.id)}`;
+  const recipients = channelRecipients(channel, author.id, members)
+    .map((id) => members.find((m) => m.id === id))
+    .filter((m): m is ChatMember => Boolean(m));
+  for (const recipient of recipients) {
+    const notice = chatMessageNotice({
+      businessName,
+      recipientName: recipient.name,
+      authorName: author.name,
+      channelName: channel.kind === 'public' ? channel.name : 'הודעה פרטית',
+      preview,
+      link,
+    });
+    for (const deliveryChannel of channels) {
+      const reachable = deliveryChannel === 'email' ? recipient.email : recipient.phone;
+      if (!reachable) continue;
+      await deliver({
+        channel: deliveryChannel,
+        to: { email: recipient.email, phone: recipient.phone },
+        message: notice,
+        relatedId: message.id,
+      });
+    }
+  }
+}
+
 /** Everyone who should receive a message in this channel, excluding the author. */
-function channelRecipients(channel: ChatChannel, authorId: string) {
-  const ids =
-    channel.kind === 'public'
-      ? listChatMembers().filter((m) => m.active).map((m) => m.id)
-      : channel.memberIds;
+function channelRecipients(channel: ChatChannel, authorId: string, members: ChatMember[]) {
+  const ids = channel.kind === 'public' ? members.filter((m) => m.active).map((m) => m.id) : channel.memberIds;
   return ids.filter((id) => id !== authorId);
 }
 
 /** Soft-delete: authors can remove their own message, admins any message. */
-export function deleteChatMessage(messageId: string, actorId: string, actorIsAdmin: boolean) {
-  const messages = listMessagesRaw();
-  const index = messages.findIndex((m) => m.id === messageId);
-  if (index === -1) return false;
-  const message = messages[index];
-  if (message.authorId !== actorId && !actorIsAdmin) return false;
+export async function deleteChatMessage(messageId: string, actorId: string, actorIsAdmin: boolean) {
+  return transaction(async () => {
+    const row = await sqlOne('SELECT * FROM chat_messages WHERE id = $1 FOR UPDATE', [messageId]);
+    if (!row) return false;
+    const message = toMessage(row);
+    if (message.authorId !== actorId && !actorIsAdmin) return false;
 
-  message.deletedAt = nowIso();
-  message.body = undefined;
-  // Remove the files from disk; the row stays as a "deleted" placeholder.
-  for (const attachment of message.attachments) {
-    const filePath = path.join(channelFolder(message.channelId), attachment.fileName);
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-  }
-  message.attachments = [];
-  messages[index] = message;
-  saveMessages(messages);
-  return true;
+    await sql("UPDATE chat_messages SET deleted_at = $2, body = NULL, attachments = '[]' WHERE id = $1", [
+      messageId,
+      nowIso(),
+    ]);
+    // Remove the files from disk; the row stays as a "deleted" placeholder.
+    const folder = channelFolder(message.channelId);
+    const paths = message.attachments.map((a) => path.join(folder, path.basename(a.fileName)));
+    afterCommit(() => {
+      for (const filePath of paths) if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    });
+    return true;
+  });
 }
 
 export function readAttachment(message: ChatMessage, attachmentId: string) {
   const attachment = message.attachments.find((a) => a.id === attachmentId);
   if (!attachment) return undefined;
-  const filePath = path.join(channelFolder(message.channelId), attachment.fileName);
+  const filePath = path.join(channelFolder(message.channelId), path.basename(attachment.fileName));
   if (!fs.existsSync(filePath)) return undefined;
   return { attachment, buffer: fs.readFileSync(filePath) };
 }
 
 // ── Read state & conversation list ───────────────────────────────────────────
 
-export function markChannelRead(channelId: string, memberId: string) {
-  const messages = listMessagesRaw();
-  let changed = false;
-  for (const message of messages) {
-    if (message.channelId === channelId && !message.readBy.includes(memberId)) {
-      message.readBy.push(memberId);
-      changed = true;
-    }
-  }
-  if (changed) saveMessages(messages);
-  return changed;
+export async function markChannelRead(channelId: string, memberId: string) {
+  const rows = await sql(
+    `UPDATE chat_messages SET read_by = array_append(read_by, $2)
+      WHERE channel_id = $1 AND NOT ($2 = ANY(read_by))
+      RETURNING id`,
+    [channelId, memberId],
+  );
+  return rows.length > 0;
 }
 
 export interface ConversationSummary extends ChatChannel {
@@ -380,17 +420,34 @@ function previewOf(message: ChatMessage) {
 
 /** Conversations visible to a member: the public channel + their DMs, plus a
  *  placeholder row for every teammate they have not talked to yet. */
-export function listConversations(memberId: string): ConversationSummary[] {
-  const members = listChatMembers();
+export async function listConversations(memberId: string): Promise<ConversationSummary[]> {
+  const members = await listChatMembers();
   const me = members.find((m) => m.id === memberId);
   if (!me) return [];
 
-  const messages = listMessagesRaw();
-  const channels = [ensurePublicChannel(), ...listChannelsRaw().filter((c) => c.id !== PUBLIC_CHANNEL_ID)];
+  await ensurePublicChannel();
+  const channels = (await listChannelsRaw()).filter((c) => canAccessChannel(c, memberId));
+  const channelIds = channels.map((c) => c.id);
 
-  function summarize(channel: ChatChannel): ConversationSummary {
-    const channelMessages = messages.filter((m) => m.channelId === channel.id);
-    const last = channelMessages[channelMessages.length - 1];
+  const [lastRows, unreadRows] = await Promise.all([
+    sql(
+      `SELECT DISTINCT ON (channel_id) * FROM chat_messages
+        WHERE channel_id = ANY($1)
+        ORDER BY channel_id, created_at DESC, length(id) DESC, id DESC`,
+      [channelIds],
+    ),
+    sql<{ channel_id: string; unread: number }>(
+      `SELECT channel_id, count(*)::int AS unread FROM chat_messages
+        WHERE channel_id = ANY($1) AND author_id <> $2 AND NOT ($2 = ANY(read_by))
+        GROUP BY channel_id`,
+      [channelIds, memberId],
+    ),
+  ]);
+  const lastByChannel = new Map(lastRows.map((r) => [r.channel_id as string, toMessage(r)]));
+  const unreadByChannel = new Map(unreadRows.map((r) => [r.channel_id, r.unread]));
+
+  const visible: ConversationSummary[] = channels.map((channel) => {
+    const last = lastByChannel.get(channel.id);
     const otherId = channel.kind === 'direct' ? channel.memberIds.find((id) => id !== memberId) : undefined;
     const other = otherId ? members.find((m) => m.id === otherId) : undefined;
     return {
@@ -398,14 +455,12 @@ export function listConversations(memberId: string): ConversationSummary[] {
       title: channel.kind === 'public' ? channel.name : other?.name || 'שיחה',
       otherMemberId: otherId,
       otherRole: other?.role,
-      unread: channelMessages.filter((m) => !m.readBy.includes(memberId) && m.authorId !== memberId).length,
+      unread: unreadByChannel.get(channel.id) ?? 0,
       lastMessageAt: last?.createdAt,
       lastMessagePreview: last ? previewOf(last) : undefined,
       lastMessageAuthor: last?.authorName,
     };
-  }
-
-  const visible = channels.filter((c) => canAccessChannel(c, memberId)).map(summarize);
+  });
 
   // Offer a conversation with every other active teammate, even before the first message.
   const existingPartners = new Set(
@@ -435,10 +490,13 @@ export function listConversations(memberId: string): ConversationSummary[] {
 }
 
 /** Total unread messages across all conversations (for the nav badge). */
-export function chatUnreadCount(memberId: string) {
-  const messages = listMessagesRaw();
-  const channels = [ensurePublicChannel(), ...listChannelsRaw().filter((c) => c.id !== PUBLIC_CHANNEL_ID)];
-  const allowed = new Set(channels.filter((c) => canAccessChannel(c, memberId)).map((c) => c.id));
-  return messages.filter((m) => allowed.has(m.channelId) && m.authorId !== memberId && !m.readBy.includes(memberId))
-    .length;
+export async function chatUnreadCount(memberId: string) {
+  const row = await sqlOne<{ unread: number }>(
+    `SELECT count(*)::int AS unread
+       FROM chat_messages m JOIN chat_channels c ON c.id = m.channel_id
+      WHERE m.author_id <> $1 AND NOT ($1 = ANY(m.read_by))
+        AND (c.kind = 'public' OR $1 = ANY(c.member_ids))`,
+    [memberId],
+  );
+  return row?.unread ?? 0;
 }

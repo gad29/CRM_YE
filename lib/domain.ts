@@ -316,7 +316,7 @@ export interface TaskRecord {
   /** When to send the reminder (ISO datetime). */
   remindAt?: string;
   reminderChannels: ReminderChannel[];
-  /** Set once the reminder was handed to n8n (prevents double sends). */
+  /** Set once the reminder was sent (prevents double sends). */
   reminderSentAt?: string;
   priority: TaskPriority;
   /** 'admin' or a worker id. */

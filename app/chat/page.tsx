@@ -2,7 +2,7 @@
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { PUBLIC_CHANNEL_ID, REMINDER_CHANNEL_LABELS, type ChatMessage, type ReminderChannel } from '@/data/domain';
+import { PUBLIC_CHANNEL_ID, REMINDER_CHANNEL_LABELS, type ChatMessage, type ReminderChannel } from '@/lib/domain';
 import { VoiceRecorder } from '@/components/voice-recorder';
 
 type Conversation = {

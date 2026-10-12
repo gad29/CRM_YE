@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { countMissingItems } from '@/data/domain';
+import { countMissingItems } from '@/lib/domain';
 import {
   caseVisibleTo,
   clientVisibleTo,
@@ -24,15 +24,15 @@ export async function GET(_request: NextRequest, { params }: Params) {
   if (!auth) return NextResponse.json({ ok: false }, { status: 401 });
 
   const { clientId } = await params;
-  const client = getClient(clientId);
-  if (!client || !clientVisibleTo(client, auth.viewer)) {
+  const client = await getClient(clientId);
+  if (!client || !await clientVisibleTo(client, auth.viewer)) {
     return NextResponse.json({ ok: false, error: 'Client not found' }, { status: 404 });
   }
 
-  const payments = listPayments();
-  const workers = listWorkers();
+  const payments = await listPayments();
+  const workers = await listWorkers();
   const workerName = (id?: string) => (id && id !== 'admin' ? workers.find((w) => w.id === id)?.name || '' : '');
-  const cases = listClientCases(clientId)
+  const cases = (await listClientCases(clientId))
     .filter((c) => caseVisibleTo(c, auth.viewer))
     .map((c) => ({
       ...c,
@@ -48,9 +48,9 @@ export async function GET(_request: NextRequest, { params }: Params) {
     data: {
       client,
       cases,
-      documents: listClientDocuments(clientId),
-      payments: isAdmin ? listClientPayments(clientId) : [],
-      activity: listActivity({ clientId, limit: 30 }),
+      documents: await listClientDocuments(clientId),
+      payments: isAdmin ? await listClientPayments(clientId) : [],
+      activity: await listActivity({ clientId, limit: 30 }),
       canManagePayments: isAdmin,
     },
   });
@@ -61,8 +61,8 @@ export async function PATCH(request: NextRequest, { params }: Params) {
   if (!auth) return NextResponse.json({ ok: false }, { status: 401 });
 
   const { clientId } = await params;
-  const client = getClient(clientId);
-  if (!client || !clientVisibleTo(client, auth.viewer)) {
+  const client = await getClient(clientId);
+  if (!client || !await clientVisibleTo(client, auth.viewer)) {
     return NextResponse.json({ ok: false, error: 'Client not found' }, { status: 404 });
   }
 
@@ -73,7 +73,7 @@ export async function PATCH(request: NextRequest, { params }: Params) {
     return NextResponse.json({ ok: false, error: 'Invalid request body' }, { status: 400 });
   }
 
-  const updated = updateClient(clientId, {
+  const updated = await updateClient(clientId, {
     fullName: body.fullName,
     phone: body.phone,
     idNumber: body.idNumber,
@@ -93,7 +93,7 @@ export async function DELETE(_request: NextRequest, { params }: Params) {
     return NextResponse.json({ ok: false, error: 'רק מנהל יכול למחוק לקוח' }, { status: 403 });
   }
   const { clientId } = await params;
-  const deleted = deleteClient(clientId);
+  const deleted = await deleteClient(clientId);
   if (!deleted) return NextResponse.json({ ok: false, error: 'Client not found' }, { status: 404 });
   return NextResponse.json({ ok: true });
 }

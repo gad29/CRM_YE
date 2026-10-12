@@ -1,19 +1,15 @@
 import { NextResponse } from 'next/server';
+import { fileResponse } from '@/lib/file-response';
 import { readBlankContract } from '@/lib/store';
+import { requireViewer } from '@/lib/viewer';
 
 /** Download the blank rent-contract template — available to any signed-in user (workers included). */
 export async function GET() {
-  const template = readBlankContract();
+  const guard = await requireViewer();
+  if (guard instanceof NextResponse) return guard;
+  const template = await readBlankContract();
   if (!template) {
     return NextResponse.json({ ok: false, error: 'לא הועלה טופס חוזה שכירות ריק' }, { status: 404 });
   }
-  const encodedName = encodeURIComponent(template.meta.originalName);
-  return new NextResponse(new Uint8Array(template.buffer), {
-    headers: {
-      'Content-Type': template.meta.mimeType,
-      'Content-Length': String(template.buffer.length),
-      'Content-Disposition': `attachment; filename*=UTF-8''${encodedName}`,
-      'Cache-Control': 'private, no-store',
-    },
-  });
+  return fileResponse(template.buffer, { mimeType: template.meta.mimeType, fileName: template.meta.originalName, download: true });
 }

@@ -10,7 +10,7 @@ import {
   type GovernmentOffice,
   type InvestigationOutcome,
   type OperatingCompany,
-} from '@/data/domain';
+} from '@/lib/domain';
 import {
   caseVisibleTo,
   deleteCase,
@@ -33,14 +33,15 @@ export async function GET(_request: NextRequest, { params }: Params) {
   if (!auth) return NextResponse.json({ ok: false }, { status: 401 });
 
   const { caseId } = await params;
-  const caseRecord = getCase(caseId);
+  const caseRecord = await getCase(caseId);
   if (!caseRecord || !caseVisibleTo(caseRecord, auth.viewer)) {
     return NextResponse.json({ ok: false, error: 'Case not found' }, { status: 404 });
   }
 
   const isAdmin = auth.viewer.role === 'admin';
-  const workers = listWorkers().map(({ passwordHash: _hash, ...worker }) => worker);
-  const client = getClient(caseRecord.clientId);
+  const workers = (await listWorkers()).map(({ passwordHash: _hash, ...worker }) => worker);
+  const client = await getClient(caseRecord.clientId);
+  const casePayments = await listCasePayments(caseId);
   const workerName = (id?: string) => (id && id !== 'admin' ? workers.find((w) => w.id === id)?.name || '' : '');
   return NextResponse.json({
     ok: true,
@@ -49,18 +50,18 @@ export async function GET(_request: NextRequest, { params }: Params) {
         ...caseRecord,
         officeName: officeDisplayName(caseRecord),
         missingItems: countMissingItems(caseRecord),
-        finance: getCaseFinance(caseRecord),
+        finance: getCaseFinance(caseRecord, casePayments),
         assignedToName: workerName(caseRecord.assignedTo),
         openedByName: workerName(caseRecord.openedBy),
       },
       client,
-      documents: listCaseDocuments(caseId),
-      payments: isAdmin ? listCasePayments(caseId) : [],
-      activity: listActivity({ caseId, limit: 30 }),
+      documents: await listCaseDocuments(caseId),
+      payments: isAdmin ? casePayments : [],
+      activity: await listActivity({ caseId, limit: 30 }),
       workers: isAdmin ? workers.filter((w) => w.active) : [],
       canManagePayments: isAdmin,
       canAssign: isAdmin,
-      hasBlankContract: Boolean(getSettings().blankContract),
+      hasBlankContract: Boolean((await getSettings()).blankContract),
     },
   });
 }
@@ -70,7 +71,7 @@ export async function PATCH(request: NextRequest, { params }: Params) {
   if (!auth) return NextResponse.json({ ok: false }, { status: 401 });
 
   const { caseId } = await params;
-  const existing = getCase(caseId);
+  const existing = await getCase(caseId);
   if (!existing || !caseVisibleTo(existing, auth.viewer)) {
     return NextResponse.json({ ok: false, error: 'Case not found' }, { status: 404 });
   }
@@ -110,7 +111,7 @@ export async function PATCH(request: NextRequest, { params }: Params) {
     return NextResponse.json({ ok: false, error: 'רק מנהל יכול לשייך תיקים לעובדים' }, { status: 403 });
   }
 
-  const updated = updateCase(caseId, body);
+  const updated = await updateCase(caseId, body);
   if (!updated) return NextResponse.json({ ok: false, error: 'Case not found' }, { status: 404 });
   return NextResponse.json({ ok: true, data: updated });
 }
@@ -122,7 +123,7 @@ export async function DELETE(_request: NextRequest, { params }: Params) {
     return NextResponse.json({ ok: false, error: 'רק מנהל יכול למחוק תיק' }, { status: 403 });
   }
   const { caseId } = await params;
-  const deleted = deleteCase(caseId);
+  const deleted = await deleteCase(caseId);
   if (!deleted) return NextResponse.json({ ok: false, error: 'Case not found' }, { status: 404 });
   return NextResponse.json({ ok: true });
 }

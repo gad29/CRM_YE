@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
-import { PAYMENT_STATUS_LABELS, STAGE_LABELS, isUnderInvestigation, type CaseStage } from '@/data/domain';
+import { PAYMENT_STATUS_LABELS, STAGE_LABELS, isUnderInvestigation, type CaseStage } from '@/lib/domain';
 
 type WorkerRow = { id: string; name: string; email: string; active: boolean; openCases: number };
 type CaseRow = {

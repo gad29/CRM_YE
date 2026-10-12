@@ -2,15 +2,20 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { env } from '@/lib/env';
 import { deleteBlankContract, getSettings, saveBlankContract } from '@/lib/store';
+import { requireAdmin } from '@/lib/viewer';
 
-/** Admin-only (enforced by middleware). Workers download via /api/templates/blank-contract. */
+/** Admin-only. Workers download via /api/templates/blank-contract. */
 
 export async function GET() {
-  const settings = getSettings();
+  const guard = await requireAdmin();
+  if (guard instanceof NextResponse) return guard;
+  const settings = await getSettings();
   return NextResponse.json({ ok: true, data: settings.blankContract || null });
 }
 
 export async function POST(request: NextRequest) {
+  const guard = await requireAdmin();
+  if (guard instanceof NextResponse) return guard;
   let form: FormData;
   try {
     form = await request.formData();
@@ -27,12 +32,14 @@ export async function POST(request: NextRequest) {
   }
 
   const buffer = Buffer.from(await file.arrayBuffer());
-  const meta = saveBlankContract({ originalName: file.name, mimeType: file.type, buffer });
+  const meta = await saveBlankContract({ originalName: file.name, mimeType: file.type, buffer });
   return NextResponse.json({ ok: true, data: meta }, { status: 201 });
 }
 
 export async function DELETE() {
-  const deleted = deleteBlankContract();
+  const guard = await requireAdmin();
+  if (guard instanceof NextResponse) return guard;
+  const deleted = await deleteBlankContract();
   if (!deleted) return NextResponse.json({ ok: false, error: 'No blank contract uploaded' }, { status: 404 });
   return NextResponse.json({ ok: true });
 }

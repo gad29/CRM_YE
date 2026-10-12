@@ -5,11 +5,10 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { PasswordInput } from '@/components/password-input';
 
-type Channel = 'email' | 'sms' | 'whatsapp';
+type Channel = 'email' | 'whatsapp';
 
 const CHANNELS: Array<{ id: Channel; label: string; icon: string }> = [
   { id: 'email', label: 'אימייל', icon: '📧' },
-  { id: 'sms', label: 'SMS', icon: '📱' },
   { id: 'whatsapp', label: 'וואטסאפ', icon: '💬' },
 ];
 
@@ -117,7 +116,7 @@ export default function ForgotPasswordPage() {
                       </button>
                     ))}
                   </div>
-                  {(channel === 'sms' || channel === 'whatsapp') && (
+                  {channel === 'whatsapp' && (
                     <p className="muted" style={{ fontSize: 12, margin: '6px 0 0' }}>
                       נשלח למספר הטלפון השמור בחשבון שלך.
                     </p>
@@ -153,8 +152,8 @@ export default function ForgotPasswordPage() {
                   />
                 </div>
                 <div className="field">
-                  <label htmlFor="reset-password">סיסמה חדשה (6 תווים לפחות)</label>
-                  <PasswordInput id="reset-password" value={newPassword} onChange={setNewPassword} required minLength={6} autoComplete="new-password" />
+                  <label htmlFor="reset-password">סיסמה חדשה (8 תווים לפחות)</label>
+                  <PasswordInput id="reset-password" value={newPassword} onChange={setNewPassword} required minLength={8} autoComplete="new-password" />
                 </div>
                 {error && <p className="form-error">{error}</p>}
                 <button className="button" type="submit" disabled={loading} style={{ width: '100%' }}>

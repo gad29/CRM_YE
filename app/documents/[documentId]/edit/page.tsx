@@ -6,7 +6,7 @@ export const dynamic = 'force-dynamic';
 
 export default async function DocumentEditPage({ params }: { params: Promise<{ documentId: string }> }) {
   const { documentId } = await params;
-  const record = getDocument(documentId);
+  const record = await getDocument(documentId);
 
   if (!record) {
     return (

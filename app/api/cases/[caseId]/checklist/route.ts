@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import type { ChecklistStatus } from '@/data/domain';
+import type { ChecklistStatus } from '@/lib/domain';
 import {
   addChecklistItem,
   caseVisibleTo,
@@ -16,7 +16,7 @@ type Params = { params: Promise<{ caseId: string }> };
 async function guardCase(caseId: string) {
   const auth = await getViewer();
   if (!auth) return false;
-  const caseRecord = getCase(caseId);
+  const caseRecord = await getCase(caseId);
   return Boolean(caseRecord && caseVisibleTo(caseRecord, auth.viewer));
 }
 
@@ -31,7 +31,7 @@ export async function POST(request: NextRequest, { params }: Params) {
     return NextResponse.json({ ok: false, error: 'Invalid request body' }, { status: 400 });
   }
 
-  const item = addChecklistItem(caseId, body.label || '', body.code);
+  const item = await addChecklistItem(caseId, body.label || '', body.code);
   if (!item) return NextResponse.json({ ok: false, error: 'הוספת פריט נכשלה (אולי כבר קיים)' }, { status: 400 });
   return NextResponse.json({ ok: true, data: item }, { status: 201 });
 }
@@ -47,7 +47,7 @@ export async function PATCH(request: NextRequest, { params }: Params) {
   }
 
   if (!body.code) return NextResponse.json({ ok: false, error: 'Missing checklist item code' }, { status: 400 });
-  const item = updateChecklistItem(caseId, body.code, { status: body.status, note: body.note, label: body.label });
+  const item = await updateChecklistItem(caseId, body.code, { status: body.status, note: body.note, label: body.label });
   if (!item) return NextResponse.json({ ok: false, error: 'Checklist item not found' }, { status: 404 });
   return NextResponse.json({ ok: true, data: item });
 }
@@ -64,7 +64,7 @@ export async function DELETE(request: NextRequest, { params }: Params) {
 
   const params_ = request.nextUrl.searchParams;
   if (params_.get('clear') === '1') {
-    const removed = clearChecklist(caseId);
+    const removed = await clearChecklist(caseId);
     return NextResponse.json({ ok: true, removed });
   }
 
@@ -74,7 +74,7 @@ export async function DELETE(request: NextRequest, { params }: Params) {
   ];
   if (!codes.length) return NextResponse.json({ ok: false, error: 'Missing checklist item code(s)' }, { status: 400 });
 
-  const removed = removeChecklistItems(caseId, codes);
+  const removed = await removeChecklistItems(caseId, codes);
   if (!removed) return NextResponse.json({ ok: false, error: 'No matching checklist items' }, { status: 404 });
   return NextResponse.json({ ok: true, removed });
 }

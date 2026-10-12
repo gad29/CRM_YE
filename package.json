@@ -8,10 +8,14 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
-    "start:standalone": "node .next/standalone/server.js",
+    "start": "node scripts/db-migrate.mjs && next start",
+    "start:standalone": "node scripts/db-migrate.mjs && node .next/standalone/server.js",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
+    "db:migrate": "node scripts/db-migrate.mjs",
+    "db:status": "node scripts/db-migrate.mjs --status",
+    "db:import-json": "node scripts/import-json.mjs",
+    "db:import-json:dry-run": "node scripts/import-json.mjs --dry-run",
     "postinstall": "node scripts/copy-pdf-worker.mjs"
   },
   "dependencies": {
@@ -20,12 +24,14 @@
     "next": "^15.5.12",
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^4.10.38",
+    "pg": "^8.23.1",
     "react": "19.0.0",
     "react-dom": "19.0.0"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
     "@types/node": "22.15.3",
+    "@types/pg": "^8.23.1",
     "@types/react": "19.0.12",
     "@types/react-dom": "19.0.5",
     "typescript": "5.8.3"

@@ -1,12 +1,16 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import bcrypt from 'bcryptjs';
+import { MIN_PASSWORD_LENGTH, PASSWORD_HASH_ROUNDS } from '@/lib/admin-auth';
 import { updateWorker } from '@/lib/store';
+import { requireAdmin } from '@/lib/viewer';
 
 type Params = { params: Promise<{ workerId: string }> };
 
-/** Admin-only (enforced by middleware): rename, activate/deactivate, reset password. */
+/** Admin-only: rename, activate/deactivate, reset password. */
 export async function PATCH(request: NextRequest, { params }: Params) {
+  const guard = await requireAdmin();
+  if (guard instanceof NextResponse) return guard;
   const { workerId } = await params;
   let body: { name?: string; active?: boolean; password?: string; phone?: string };
   try {
@@ -17,13 +21,13 @@ export async function PATCH(request: NextRequest, { params }: Params) {
 
   let passwordHash: string | undefined;
   if (body.password) {
-    if (body.password.length < 6) {
-      return NextResponse.json({ ok: false, error: 'סיסמה חייבת להיות באורך 6 תווים לפחות' }, { status: 400 });
+    if (body.password.length < MIN_PASSWORD_LENGTH) {
+      return NextResponse.json({ ok: false, error: `סיסמה חייבת להיות באורך ${MIN_PASSWORD_LENGTH} תווים לפחות` }, { status: 400 });
     }
-    passwordHash = await bcrypt.hash(body.password, 10);
+    passwordHash = await bcrypt.hash(body.password, PASSWORD_HASH_ROUNDS);
   }
 
-  const updated = updateWorker(workerId, { name: body.name, active: body.active, passwordHash, phone: body.phone });
+  const updated = await updateWorker(workerId, { name: body.name, active: body.active, passwordHash, phone: body.phone });
   if (!updated) return NextResponse.json({ ok: false, error: 'Worker not found' }, { status: 404 });
   const { passwordHash: _hash, ...safe } = updated;
   return NextResponse.json({ ok: true, data: safe });

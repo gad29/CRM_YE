@@ -10,7 +10,7 @@ import {
   stageLabelOf,
   type CaseStage,
   type PaymentMethod,
-} from '@/data/domain';
+} from '@/lib/domain';
 import { useConfig } from '@/components/config-provider';
 
 type ClientDetail = {

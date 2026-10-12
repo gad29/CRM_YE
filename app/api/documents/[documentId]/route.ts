@@ -2,14 +2,15 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { deleteDocument, documentVisibleTo, getDocument, readDocumentFile, updateDocumentMeta } from '@/lib/store';
 import { getViewer } from '@/lib/viewer';
+import { fileResponse } from '@/lib/file-response';
 
 type Params = { params: Promise<{ documentId: string }> };
 
 async function guardedDocument(documentId: string) {
   const auth = await getViewer();
   if (!auth) return undefined;
-  const record = getDocument(documentId);
-  if (!record || !documentVisibleTo(record, auth.viewer)) return undefined;
+  const record = await getDocument(documentId);
+  if (!record || !await documentVisibleTo(record, auth.viewer)) return undefined;
   return record;
 }
 
@@ -27,15 +28,7 @@ export async function GET(request: NextRequest, { params }: Params) {
   if (!file) return NextResponse.json({ ok: false, error: 'File missing on disk' }, { status: 404 });
 
   const download = request.nextUrl.searchParams.get('download') === '1';
-  const encodedName = encodeURIComponent(record.originalName);
-  return new NextResponse(new Uint8Array(file), {
-    headers: {
-      'Content-Type': record.mimeType || 'application/octet-stream',
-      'Content-Length': String(file.length),
-      'Content-Disposition': `${download ? 'attachment' : 'inline'}; filename*=UTF-8''${encodedName}`,
-      'Cache-Control': 'private, no-store',
-    },
-  });
+  return fileResponse(file, { mimeType: record.mimeType, fileName: record.originalName, download });
 }
 
 export async function PATCH(request: NextRequest, { params }: Params) {
@@ -49,7 +42,7 @@ export async function PATCH(request: NextRequest, { params }: Params) {
   } catch {
     return NextResponse.json({ ok: false, error: 'Invalid request body' }, { status: 400 });
   }
-  const updated = updateDocumentMeta(documentId, body);
+  const updated = await updateDocumentMeta(documentId, body);
   if (!updated) return NextResponse.json({ ok: false, error: 'Document not found' }, { status: 404 });
   return NextResponse.json({ ok: true, data: updated });
 }
@@ -59,7 +52,7 @@ export async function DELETE(_request: NextRequest, { params }: Params) {
   if (!(await guardedDocument(documentId))) {
     return NextResponse.json({ ok: false, error: 'Document not found' }, { status: 404 });
   }
-  const deleted = deleteDocument(documentId);
+  const deleted = await deleteDocument(documentId);
   if (!deleted) return NextResponse.json({ ok: false, error: 'Document not found' }, { status: 404 });
   return NextResponse.json({ ok: true });
 }

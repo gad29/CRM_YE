@@ -88,7 +88,7 @@ export function DocumentsPanel({ clientId, documents, caseId, checklistOptions, 
   }
 
   /** Send a set of documents as a single link. */
-  async function sendDocuments(documentIds: string[], channel: 'email' | 'whatsapp' | 'sms', kind: 'single' | 'bundle') {
+  async function sendDocuments(documentIds: string[], channel: 'email' | 'whatsapp', kind: 'single' | 'bundle') {
     setSending(true);
     setError('');
     try {
@@ -119,7 +119,7 @@ export function DocumentsPanel({ clientId, documents, caseId, checklistOptions, 
     }
   }
 
-  function sendDocument(docId: string, channel: 'email' | 'whatsapp' | 'sms') {
+  function sendDocument(docId: string, channel: 'email' | 'whatsapp') {
     return sendDocuments([docId], channel, 'single');
   }
 
@@ -355,9 +355,6 @@ export function DocumentsPanel({ clientId, documents, caseId, checklistOptions, 
               {canPhone && (
                 <button type="button" className="doc-action-btn approve" disabled={sending} onClick={() => sendDocuments(selected, 'whatsapp', 'bundle')}>💬 וואטסאפ</button>
               )}
-              {canPhone && (
-                <button type="button" className="doc-action-btn approve" disabled={sending} onClick={() => sendDocuments(selected, 'sms', 'bundle')}>📱 SMS</button>
-              )}
               <button type="button" className="doc-action-btn" onClick={() => setBundleOpen(false)}>ביטול</button>
               {sending && <span className="muted" style={{ fontSize: 12 }}>שולח…</span>}
               {error && <p className="form-error" style={{ width: '100%', margin: '4px 0 0' }}>{error}</p>}
@@ -423,11 +420,6 @@ export function DocumentsPanel({ clientId, documents, caseId, checklistOptions, 
                   {canPhone && (
                     <button type="button" className="doc-action-btn approve" disabled={sending} onClick={() => sendDocument(doc.id, 'whatsapp')}>
                       💬 וואטסאפ
-                    </button>
-                  )}
-                  {canPhone && (
-                    <button type="button" className="doc-action-btn approve" disabled={sending} onClick={() => sendDocument(doc.id, 'sms')}>
-                      📱 SMS
                     </button>
                   )}
                   <button type="button" className="doc-action-btn" onClick={() => setSendOpen(null)}>ביטול</button>

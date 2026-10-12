@@ -79,7 +79,7 @@ function AdminsSection() {
   }
 
   async function resetPassword(admin: AdminRow) {
-    const password = window.prompt(`סיסמה חדשה עבור ${admin.name} (6 תווים לפחות):`);
+    const password = window.prompt(`סיסמה חדשה עבור ${admin.name} (8 תווים לפחות):`);
     if (!password) return;
     setBusy(admin.id);
     try {
@@ -119,11 +119,11 @@ function AdminsSection() {
               <input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} required dir="ltr" style={{ textAlign: 'right' }} />
             </div>
             <div className="field">
-              <label>סיסמה (6 תווים לפחות) *</label>
-              <PasswordInput value={form.password} onChange={(v) => setForm({ ...form, password: v })} required minLength={6} autoComplete="new-password" />
+              <label>סיסמה (8 תווים לפחות) *</label>
+              <PasswordInput value={form.password} onChange={(v) => setForm({ ...form, password: v })} required minLength={8} autoComplete="new-password" />
             </div>
             <div className="field">
-              <label>טלפון (לאיפוס סיסמה ב-SMS/וואטסאפ)</label>
+              <label>טלפון (לתזכורות ואיפוס סיסמה בוואטסאפ)</label>
               <input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} dir="ltr" style={{ textAlign: 'right' }} placeholder="972501234567" />
             </div>
           </div>
@@ -258,7 +258,7 @@ export default function WorkersPage() {
   }
 
   async function resetPassword(worker: WorkerRow) {
-    const password = window.prompt(`סיסמה חדשה עבור ${worker.name} (6 תווים לפחות):`);
+    const password = window.prompt(`סיסמה חדשה עבור ${worker.name} (8 תווים לפחות):`);
     if (!password) return;
     setBusy(worker.id);
     try {
@@ -372,12 +372,12 @@ export default function WorkersPage() {
               />
             </div>
             <div className="field">
-              <label>סיסמה (6 תווים לפחות) *</label>
+              <label>סיסמה (8 תווים לפחות) *</label>
               <PasswordInput
                 value={form.password}
                 onChange={(v) => setForm({ ...form, password: v })}
                 required
-                minLength={6}
+                minLength={8}
                 autoComplete="new-password"
               />
             </div>

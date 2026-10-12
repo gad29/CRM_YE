@@ -1,10 +1,8 @@
 // Signed, expiring links for sharing a document with a client without login.
+// Same secret as the session cookie (ADMIN_SESSION_SECRET): moving the app to
+// another server with that secret unchanged keeps already-sent links working.
 import crypto from 'node:crypto';
-import { env } from '@/lib/env';
-
-function shareSecret() {
-  return env.adminSessionSecret || env.adminPasswordHash || env.adminPassword || 'crmye-share-secret';
-}
+import { signingSecret } from '@/lib/session-token';
 
 function base64url(input: string) {
   return Buffer.from(input, 'utf8').toString('base64url');
@@ -15,7 +13,7 @@ function decodeBase64url(input: string) {
 }
 
 function sign(encoded: string) {
-  return crypto.createHmac('sha256', shareSecret()).update(encoded).digest('base64url');
+  return crypto.createHmac('sha256', signingSecret()).update(encoded).digest('base64url');
 }
 
 /** Create a share token for one or more documents, valid for `ttlDays` (default 14). */

@@ -14,8 +14,8 @@ export async function POST(request: NextRequest, { params }: Params) {
   const auth = await getViewer();
   if (!auth) return NextResponse.json({ ok: false }, { status: 401 });
   const { documentId } = await params;
-  const source = getDocument(documentId);
-  if (!source || !documentVisibleTo(source, auth.viewer)) {
+  const source = await getDocument(documentId);
+  if (!source || !await documentVisibleTo(source, auth.viewer)) {
     return NextResponse.json({ ok: false, error: 'Document not found' }, { status: 404 });
   }
 
@@ -37,7 +37,7 @@ export async function POST(request: NextRequest, { params }: Params) {
   const buffer = Buffer.from(await file.arrayBuffer());
   const label = String(form.get('label') || '') || `${source.label || source.originalName} (ערוך)`;
 
-  const record = saveDocument({
+  const record = await saveDocument({
     clientId: source.clientId,
     caseId: source.caseId,
     originalName: file.name || source.originalName,

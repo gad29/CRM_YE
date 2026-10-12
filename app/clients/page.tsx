@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { Suspense, useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { CASE_KIND_LABELS, type CaseKind, type OperatingCompany } from '@/data/domain';
+import { CASE_KIND_LABELS, type CaseKind, type OperatingCompany } from '@/lib/domain';
 import { useConfig } from '@/components/config-provider';
 
 type ClientRow = {

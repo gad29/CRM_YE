@@ -7,7 +7,7 @@ import {
   TASK_PRIORITY_LABELS,
   type ReminderChannel,
   type TaskPriority,
-} from '@/data/domain';
+} from '@/lib/domain';
 
 type TaskRow = {
   id: string;
@@ -254,7 +254,7 @@ export default function TasksPage() {
                 </select>
               </div>
               <div className="field">
-                <label>ערוצי תזכורת (דרך n8n)</label>
+                <label>ערוצי תזכורת</label>
                 <div style={{ display: 'flex', gap: 8 }}>
                   {(Object.entries(REMINDER_CHANNEL_LABELS) as [ReminderChannel, string][]).map(([value, label]) => (
                     <label key={value} className={`choice-card ${form.channels.includes(value) ? 'selected' : ''}`} style={{ padding: '10px 14px' }}>

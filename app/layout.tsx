@@ -11,10 +11,16 @@ const sans = Noto_Sans_Hebrew({
   display: 'swap',
 });
 
+// Rendered per request: the title comes from the live config in the database,
+// and the build (e.g. inside Docker) must not need a database connection.
+export const dynamic = 'force-dynamic';
+
 export async function generateMetadata(): Promise<Metadata> {
-  const config = getConfig();
+  const businessName = await getConfig()
+    .then((config) => config.businessName)
+    .catch(() => '');
   return {
-    title: config.businessName || 'CRM_YE',
+    title: businessName || 'CRM_YE',
     description: 'ניהול תיקי לקוחות, מסמכים ותשלומים עבור מלווה בהגשות למשרדי ממשלה.',
   };
 }

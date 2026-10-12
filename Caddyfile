@@ -1,0 +1,9 @@
+# Caddy gets and renews the HTTPS certificate for $DOMAIN automatically.
+{$DOMAIN} {
+	encode zstd gzip
+	# Uploads up to 25MB per file (UPLOAD_MAX_FILE_BYTES) plus form overhead.
+	request_body {
+		max_size 30MB
+	}
+	reverse_proxy app:3006
+}

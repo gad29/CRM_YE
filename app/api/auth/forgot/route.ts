@@ -1,11 +1,13 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { hasN8nConfig } from '@/lib/env';
+import { directChannelAvailable } from '@/lib/notify';
+import { consumeRateLimit } from '@/lib/rate-limit';
+import { clientIp } from '@/lib/request-ip';
 import { requestPasswordReset } from '@/lib/store';
 
 /**
- * Public: requests a password-reset code, delivered via n8n on the chosen
- * channel. Responds identically whether or not the email exists.
+ * Public: requests a password-reset code by email (Resend) or WhatsApp (Meta).
+ * Responds identically whether or not the email exists.
  */
 export async function POST(request: NextRequest) {
   let body: { email?: string; channel?: string };
@@ -16,18 +18,28 @@ export async function POST(request: NextRequest) {
   }
 
   const email = (body.email || '').trim().toLowerCase();
-  if (!email || !email.includes('@')) {
+  if (!email || !email.includes('@') || email.length > 200) {
     return NextResponse.json({ ok: false, error: 'נא להזין כתובת אימייל תקינה' }, { status: 400 });
   }
 
-  if (!hasN8nConfig()) {
+  const channel = body.channel === 'whatsapp' ? 'whatsapp' : 'email';
+  if (!directChannelAvailable(channel)) {
     return NextResponse.json(
-      { ok: false, error: 'שליחת קוד איפוס דורשת חיבור n8n מוגדר (N8N_WEBHOOK_BASE_URL). פנה למנהל המערכת.' },
+      {
+        ok: false,
+        error:
+          channel === 'email'
+            ? 'שליחת קוד באימייל לא הוגדרה בשרת. פנו למנהל המערכת.'
+            : 'שליחת קוד בוואטסאפ לא הוגדרה בשרת. נסו באימייל או פנו למנהל המערכת.',
+      },
       { status: 503 },
     );
   }
 
-  const channel = body.channel === 'sms' || body.channel === 'whatsapp' ? body.channel : 'email';
+  if (!(await consumeRateLimit(`forgot-ip:${clientIp(request)}`, 10, 60 * 60))) {
+    return NextResponse.json({ ok: false, error: 'יותר מדי בקשות. נסו שוב בעוד שעה.' }, { status: 429 });
+  }
+
   await requestPasswordReset(email, channel);
   // Always the same answer — email enumeration is not possible.
   return NextResponse.json({ ok: true });

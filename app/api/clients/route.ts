@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { countMissingItems, type CaseKind, type OperatingCompany } from '@/data/domain';
+import { countMissingItems, type CaseKind, type OperatingCompany } from '@/lib/domain';
 import { createCase, createClient, getCaseFinance, getConfig, listCases, listPayments, listVisibleClients } from '@/lib/store';
 import { actorId, getViewer } from '@/lib/viewer';
 
@@ -8,9 +8,9 @@ export async function GET() {
   const auth = await getViewer();
   if (!auth) return NextResponse.json({ ok: false }, { status: 401 });
 
-  const clients = listVisibleClients(auth.viewer);
-  const cases = listCases();
-  const payments = listPayments();
+  const clients = await listVisibleClients(auth.viewer);
+  const cases = await listCases();
+  const payments = await listPayments();
 
   const enriched = clients.map((client) => {
     const clientCases = cases.filter((c) => c.clientId === client.id);
@@ -64,9 +64,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ ok: false, error: 'שם מלא וטלפון הם שדות חובה' }, { status: 400 });
   }
 
-  const config = getConfig();
+  const config = await getConfig();
   const creator = actorId(auth.session);
-  const record = createClient({
+  const record = await createClient({
     fullName: body.fullName,
     phone: body.phone,
     idNumber: body.idNumber,
@@ -82,7 +82,7 @@ export async function POST(request: NextRequest) {
   let caseRecord = undefined;
   if (shouldCreateCase) {
     const seed = body.case?.seedChecklist ?? config.seedChecklistByDefault;
-    caseRecord = createCase({
+    caseRecord = await createCase({
       clientId: record.id,
       title: body.case?.title?.trim() || config.defaultCaseTitle,
       office: 'housing-ministry',

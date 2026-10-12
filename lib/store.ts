@@ -1,3 +1,9 @@
+// CRM_YE data store on PostgreSQL. Document, chat and template FILES stay on
+// disk under DATA_DIR; everything else lives in the database (see migrations/).
+//
+// Multi-step changes run in transactions with row locks, so two people editing
+// the same case can no longer overwrite each other the way the old JSON store
+// (read-whole-file / write-whole-file) could.
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -33,122 +39,137 @@ import {
   type TaskPriority,
   type TaskRecord,
   type WorkerRecord,
-} from '@/data/domain';
+} from '@/lib/domain';
+import { afterCommit, iso, isoOpt, nul, opt, sql, sqlCount, sqlOne, transaction } from '@/lib/db';
 import { env } from '@/lib/env';
-import { triggerN8n } from '@/lib/n8n';
+import { documentsLinkMessage, passwordResetMessage, taskAssignedMessage } from '@/lib/messages';
+import { deliver, directChannelAvailable, type DeliveryChannel } from '@/lib/notify';
+import { consumeRateLimit } from '@/lib/rate-limit';
+import { revokeAccountSessions } from '@/lib/sessions';
 import { signShareToken } from '@/lib/share';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Row = Record<string, any>;
 
 const appRoot = process.cwd();
 
-/** Storage primitives are exported so sibling modules (e.g. lib/chat.ts) reuse them. */
+// ── File locations (documents, chat files and templates stay on disk) ───────
+
 export function dataRoot() {
   return path.isAbsolute(env.dataDir) ? env.dataDir : path.join(appRoot, env.dataDir);
 }
 
-export function dbFile(name: string) {
-  return path.join(dataRoot(), 'db', `${name}.json`);
+/** Ids become folder names — refuse anything that could climb out of DATA_DIR. */
+export function safeSegment(value: string) {
+  if (!value || value.includes('/') || value.includes('\\') || value === '.' || value === '..' || value.includes('\0')) {
+    throw new Error(`Unsafe path segment: ${JSON.stringify(value)}`);
+  }
+  return value;
 }
 
 export function clientFolder(clientId: string) {
-  return path.join(dataRoot(), 'clients', clientId);
+  return path.join(dataRoot(), 'clients', safeSegment(clientId));
 }
 
 export function clientDocumentsFolder(clientId: string) {
   return path.join(clientFolder(clientId), 'documents');
 }
 
-function logStore(level: 'info' | 'warn' | 'error', message: string, details?: Record<string, unknown>) {
-  const payload = details ? ` ${JSON.stringify(details)}` : '';
-  const logger = level === 'error' ? console.error : level === 'warn' ? console.warn : console.info;
-  logger(`[CRM_YE Store] ${message}${payload}`);
-}
-
-export function readJson<T>(filePath: string, fallback: T): T {
-  if (!fs.existsSync(filePath)) return fallback;
-  try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf8')) as T;
-  } catch (error) {
-    logStore('error', 'Failed to parse JSON store file', { filePath, error: String(error) });
-    return fallback;
-  }
-}
-
-export function writeJson(filePath: string, value: unknown) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const serialized = JSON.stringify(value, null, 2);
-  const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmp, serialized);
-  try {
-    fs.renameSync(tmp, filePath);
-  } catch {
-    fs.copyFileSync(tmp, filePath);
-    fs.unlinkSync(tmp);
-  }
-}
-
-// ── ID generation ────────────────────────────────────────────────────────────
-
-type Counters = Record<string, number>;
-
-export function nextId(prefix: string, counterKey: string, start = 1000) {
-  const file = dbFile('counters');
-  const counters = readJson<Counters>(file, {});
-  const next = (counters[counterKey] ?? start) + 1;
-  counters[counterKey] = next;
-  writeJson(file, counters);
-  return `${prefix}-${next}`;
-}
-
 function nowIso() {
   return new Date().toISOString();
 }
 
-// ── n8n events (fire-and-forget) ─────────────────────────────────────────────
+// ── ID generation ────────────────────────────────────────────────────────────
 
-export async function fireEvent(event: string, payload: Record<string, unknown>) {
-  if (!env.n8nWebhookBaseUrl) return { ok: false, error: 'n8n not configured' } as const;
-  try {
-    const result = await triggerN8n(`crmye/${event}`, { event, ...payload, firedAt: nowIso() });
-    if (!result.ok) logStore('warn', `n8n event ${event} failed`, { error: result.error });
-    return result;
-  } catch (error) {
-    logStore('warn', `n8n event ${event} threw`, { error: String(error) });
-    return { ok: false, error: String(error) } as const;
-  }
+/** Atomically allocate the next id for an entity, e.g. CL-1167. */
+export async function nextId(prefix: string, counterKey: string, start = 1000) {
+  const row = await sqlOne<{ value: number }>(
+    `INSERT INTO counters (key, value) VALUES ($1, $2 + 1)
+     ON CONFLICT (key) DO UPDATE SET value = counters.value + 1
+     RETURNING value`,
+    [counterKey, start],
+  );
+  return `${prefix}-${row!.value}`;
 }
 
 // ── Activity log ─────────────────────────────────────────────────────────────
 
-export function logActivity(input: { type: string; summary: string; clientId?: string; caseId?: string }) {
-  const file = dbFile('activity');
-  const entries = readJson<ActivityRecord[]>(file, []);
+export async function logActivity(input: { type: string; summary: string; clientId?: string; caseId?: string }) {
   const record: ActivityRecord = {
     id: crypto.randomUUID(),
     at: nowIso(),
     ...input,
   };
-  entries.unshift(record);
-  // Keep the log bounded.
-  writeJson(file, entries.slice(0, 2000));
+  await sql('INSERT INTO activity (id, type, client_id, case_id, summary, at) VALUES ($1, $2, $3, $4, $5, $6)', [
+    record.id,
+    record.type,
+    record.clientId ?? null,
+    record.caseId ?? null,
+    record.summary,
+    record.at,
+  ]);
   return record;
 }
 
-export function listActivity(options?: { clientId?: string; caseId?: string; limit?: number }) {
-  const entries = readJson<ActivityRecord[]>(dbFile('activity'), []);
-  let filtered = entries;
-  if (options?.clientId) filtered = filtered.filter((e) => e.clientId === options.clientId);
-  if (options?.caseId) filtered = filtered.filter((e) => e.caseId === options.caseId);
-  return filtered.slice(0, options?.limit ?? 50);
+function toActivity(row: Row): ActivityRecord {
+  return {
+    id: row.id,
+    type: row.type,
+    clientId: opt(row.client_id),
+    caseId: opt(row.case_id),
+    summary: row.summary,
+    at: iso(row.at),
+  };
+}
+
+export async function listActivity(options?: { clientId?: string; caseId?: string; limit?: number }) {
+  const where: string[] = [];
+  const params: unknown[] = [];
+  if (options?.clientId) {
+    params.push(options.clientId);
+    where.push(`client_id = $${params.length}`);
+  }
+  if (options?.caseId) {
+    params.push(options.caseId);
+    where.push(`case_id = $${params.length}`);
+  }
+  params.push(options?.limit ?? 50);
+  const rows = await sql(
+    `SELECT * FROM activity ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+     ORDER BY at DESC, id DESC LIMIT $${params.length}`,
+    params,
+  );
+  return rows.map(toActivity);
 }
 
 // ── Clients ──────────────────────────────────────────────────────────────────
 
-export function listClients(): ClientRecord[] {
-  return readJson<ClientRecord[]>(dbFile('clients'), []);
+function toClient(row: Row): ClientRecord {
+  return {
+    id: row.id,
+    fullName: row.full_name,
+    idNumber: opt(row.id_number),
+    phone: row.phone,
+    email: opt(row.email),
+    address: opt(row.address),
+    city: opt(row.city),
+    notes: opt(row.notes),
+    createdBy: opt(row.created_by),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+  };
 }
 
-export function getClient(clientId: string) {
-  return listClients().find((c) => c.id === clientId);
+// Natural id order breaks timestamp ties (CL-999 before CL-1000).
+const CLIENT_ORDER = 'ORDER BY created_at DESC, length(id) DESC, id DESC';
+
+export async function listClients(): Promise<ClientRecord[]> {
+  return (await sql(`SELECT * FROM clients ${CLIENT_ORDER}`)).map(toClient);
+}
+
+export async function getClient(clientId: string, options?: { forUpdate?: boolean }) {
+  const row = await sqlOne(`SELECT * FROM clients WHERE id = $1${options?.forUpdate ? ' FOR UPDATE' : ''}`, [clientId]);
+  return row ? toClient(row) : undefined;
 }
 
 export interface CreateClientInput {
@@ -163,10 +184,9 @@ export interface CreateClientInput {
   createdBy?: string;
 }
 
-export function createClient(input: CreateClientInput): ClientRecord {
-  const clients = listClients();
+export async function createClient(input: CreateClientInput): Promise<ClientRecord> {
   const record: ClientRecord = {
-    id: nextId('CL', 'client'),
+    id: await nextId('CL', 'client'),
     fullName: input.fullName.trim(),
     phone: input.phone.trim(),
     idNumber: input.idNumber?.trim() || undefined,
@@ -178,81 +198,227 @@ export function createClient(input: CreateClientInput): ClientRecord {
     createdAt: nowIso(),
     updatedAt: nowIso(),
   };
-  clients.unshift(record);
-  writeJson(dbFile('clients'), clients);
+  await writeClient(record, 'insert');
   fs.mkdirSync(clientDocumentsFolder(record.id), { recursive: true });
-  logActivity({ type: 'client-created', clientId: record.id, summary: `נפתח לקוח חדש: ${record.fullName}` });
-  void fireEvent('client-created', { clientId: record.id, fullName: record.fullName, phone: record.phone, email: record.email || '' });
+  await logActivity({ type: 'client-created', clientId: record.id, summary: `נפתח לקוח חדש: ${record.fullName}` });
   return record;
 }
 
-export function updateClient(clientId: string, input: Partial<CreateClientInput>) {
-  const clients = listClients();
-  const index = clients.findIndex((c) => c.id === clientId);
-  if (index === -1) return undefined;
-  const current = clients[index];
-  const updated: ClientRecord = {
-    ...current,
-    ...Object.fromEntries(Object.entries(input).filter(([, v]) => v !== undefined)),
-    updatedAt: nowIso(),
-  };
-  clients[index] = updated;
-  writeJson(dbFile('clients'), clients);
-  logActivity({ type: 'client-updated', clientId, summary: `עודכנו פרטי לקוח: ${updated.fullName}` });
+async function writeClient(record: ClientRecord, mode: 'insert' | 'update') {
+  const values = [
+    record.id,
+    record.fullName,
+    record.idNumber ?? null,
+    record.phone,
+    record.email ?? null,
+    record.address ?? null,
+    record.city ?? null,
+    record.notes ?? null,
+    record.createdBy ?? null,
+    record.createdAt,
+    record.updatedAt,
+  ];
+  if (mode === 'insert') {
+    await sql(
+      `INSERT INTO clients (id, full_name, id_number, phone, email, address, city, notes, created_by, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      values,
+    );
+  } else {
+    await sql(
+      `UPDATE clients SET full_name = $2, id_number = $3, phone = $4, email = $5, address = $6, city = $7,
+              notes = $8, created_by = $9, created_at = $10, updated_at = $11
+        WHERE id = $1`,
+      values,
+    );
+  }
+}
+
+export async function updateClient(clientId: string, input: Partial<CreateClientInput>) {
+  const updated = await transaction(async () => {
+    const current = await getClient(clientId, { forUpdate: true });
+    if (!current) return undefined;
+    const next: ClientRecord = {
+      ...current,
+      ...Object.fromEntries(Object.entries(input).filter(([, v]) => v !== undefined)),
+      updatedAt: nowIso(),
+    };
+    await writeClient(next, 'update');
+    return next;
+  });
+  if (!updated) return undefined;
+  await logActivity({ type: 'client-updated', clientId, summary: `עודכנו פרטי לקוח: ${updated.fullName}` });
   return updated;
 }
 
 /** Delete a client and everything belonging to them: cases, documents, payments, and their folder on disk. */
-export function deleteClient(clientId: string) {
-  const record = getClient(clientId);
-  if (!record) return false;
+export async function deleteClient(clientId: string) {
+  return transaction(async () => {
+    const record = await getClient(clientId, { forUpdate: true });
+    if (!record) return false;
 
-  for (const c of listClientCases(clientId)) deleteCase(c.id);
-  for (const d of listClientDocuments(clientId)) deleteDocument(d.id);
+    // Case by case (and document by document) so the activity log keeps the
+    // same per-item trail it always had. Files are removed only after commit.
+    for (const c of await listClientCases(clientId)) await deleteCase(c.id);
+    for (const d of await listClientDocuments(clientId)) await deleteDocument(d.id);
 
-  const payments = listPayments();
-  const remaining = payments.filter((p) => p.clientId !== clientId);
-  if (remaining.length !== payments.length) writeJson(dbFile('payments'), remaining);
+    await sql('DELETE FROM payments WHERE client_id = $1', [clientId]);
+    await sql('UPDATE tasks SET client_id = NULL WHERE client_id = $1', [clientId]);
+    await sql('DELETE FROM clients WHERE id = $1', [clientId]);
 
-  const tasks = listTasks();
-  let tasksChanged = false;
-  for (const t of tasks) {
-    if (t.clientId === clientId) {
-      t.clientId = undefined;
-      tasksChanged = true;
-    }
-  }
-  if (tasksChanged) writeJson(dbFile('tasks'), tasks);
+    const folder = clientFolder(clientId);
+    afterCommit(() => {
+      try {
+        fs.rmSync(folder, { recursive: true, force: true });
+      } catch {
+        /* folder may not exist */
+      }
+    });
 
-  try {
-    fs.rmSync(clientFolder(clientId), { recursive: true, force: true });
-  } catch {
-    /* folder may not exist */
-  }
-
-  writeJson(dbFile('clients'), listClients().filter((c) => c.id !== clientId));
-  logActivity({ type: 'client-deleted', summary: `נמחק לקוח: ${record.fullName}` });
-  return true;
+    await logActivity({ type: 'client-deleted', summary: `נמחק לקוח: ${record.fullName}` });
+    return true;
+  });
 }
 
 // ── Cases ────────────────────────────────────────────────────────────────────
 
-export function listCases(): CaseRecord[] {
-  const cases = readJson<CaseRecord[]>(dbFile('cases'), []);
-  // Normalize stage codes written by older versions (read-time migration).
-  for (const caseRecord of cases) {
-    const mapped = LEGACY_STAGE_MAP[caseRecord.stage as string];
-    if (mapped) caseRecord.stage = mapped;
+function toChecklistItem(row: Row): ChecklistItem {
+  return {
+    code: row.code,
+    label: row.label,
+    status: row.status as ChecklistStatus,
+    note: opt(row.note),
+    documentIds: row.document_ids ?? [],
+    updatedAt: iso(row.updated_at),
+  };
+}
+
+function toCase(row: Row, checklist: ChecklistItem[]): CaseRecord {
+  // Normalize stage codes written by older versions.
+  const stage = (LEGACY_STAGE_MAP[row.stage] ?? row.stage) as CaseStage;
+  return {
+    id: row.id,
+    clientId: row.client_id,
+    title: row.title,
+    office: row.office as GovernmentOffice,
+    officeOther: opt(row.office_other),
+    description: opt(row.description),
+    stage,
+    checklist,
+    company: opt(row.company) as OperatingCompany | undefined,
+    caseKind: opt(row.case_kind) as CaseKind | undefined,
+    troubleFlag: opt(row.trouble_flag),
+    troubleNote: opt(row.trouble_note),
+    openedBy: opt(row.opened_by),
+    assignedTo: opt(row.assigned_to),
+    fee: Number(row.fee),
+    referenceNumber: opt(row.reference_number),
+    nextAction: opt(row.next_action),
+    notes: opt(row.notes),
+    decision: opt(row.decision),
+    decisionStatus: opt(row.decision_status) as DecisionStatus | undefined,
+    investigationOutcome: opt(row.investigation_outcome) as InvestigationOutcome | undefined,
+    paymentStatusOverride: opt(row.payment_status_override) as PaymentStatus | undefined,
+    openedAt: iso(row.opened_at),
+    submittedAt: isoOpt(row.submitted_at),
+    decisionAt: isoOpt(row.decision_at),
+    closedAt: isoOpt(row.closed_at),
+    updatedAt: iso(row.updated_at),
+  };
+}
+
+const CASE_ORDER = 'ORDER BY opened_at DESC, length(id) DESC, id DESC';
+
+/** Load cases matching a WHERE clause together with their checklists. */
+async function queryCases(where = '', params: unknown[] = [], lock = false): Promise<CaseRecord[]> {
+  const rows = await sql(`SELECT * FROM cases ${where} ${CASE_ORDER}${lock ? ' FOR UPDATE' : ''}`, params);
+  if (!rows.length) return [];
+  const items = await sql('SELECT * FROM case_checklist_items WHERE case_id = ANY($1) ORDER BY case_id, position', [
+    rows.map((r) => r.id),
+  ]);
+  const byCase = new Map<string, ChecklistItem[]>();
+  for (const item of items) {
+    const list = byCase.get(item.case_id) ?? [];
+    list.push(toChecklistItem(item));
+    byCase.set(item.case_id, list);
   }
-  return cases;
+  return rows.map((row) => toCase(row, byCase.get(row.id) ?? []));
 }
 
-export function getCase(caseId: string) {
-  return listCases().find((c) => c.id === caseId);
+export async function listCases(): Promise<CaseRecord[]> {
+  return queryCases();
 }
 
-export function listClientCases(clientId: string) {
-  return listCases().filter((c) => c.clientId === clientId);
+export async function getCase(caseId: string, options?: { forUpdate?: boolean }) {
+  return (await queryCases('WHERE id = $1', [caseId], options?.forUpdate))[0];
+}
+
+export async function listClientCases(clientId: string) {
+  return queryCases('WHERE client_id = $1', [clientId]);
+}
+
+async function writeCase(record: CaseRecord, mode: 'insert' | 'update') {
+  const values = [
+    record.id,
+    record.clientId,
+    record.title,
+    record.office,
+    record.officeOther ?? null,
+    record.description ?? null,
+    record.stage,
+    record.company ?? null,
+    record.caseKind ?? null,
+    record.troubleFlag ?? null,
+    record.troubleNote ?? null,
+    record.openedBy ?? null,
+    record.assignedTo ?? null,
+    record.fee,
+    record.referenceNumber ?? null,
+    record.nextAction ?? null,
+    record.notes ?? null,
+    record.decision ?? null,
+    record.decisionStatus ?? null,
+    record.investigationOutcome ?? null,
+    record.paymentStatusOverride ?? null,
+    record.openedAt,
+    record.submittedAt ?? null,
+    record.decisionAt ?? null,
+    record.closedAt ?? null,
+    record.updatedAt,
+  ];
+  if (mode === 'insert') {
+    await sql(
+      `INSERT INTO cases (id, client_id, title, office, office_other, description, stage, company, case_kind,
+              trouble_flag, trouble_note, opened_by, assigned_to, fee, reference_number, next_action, notes, decision,
+              decision_status, investigation_outcome, payment_status_override, opened_at, submitted_at, decision_at,
+              closed_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
+               $23, $24, $25, $26)`,
+      values,
+    );
+  } else {
+    await sql(
+      `UPDATE cases SET client_id = $2, title = $3, office = $4, office_other = $5, description = $6, stage = $7,
+              company = $8, case_kind = $9, trouble_flag = $10, trouble_note = $11, opened_by = $12, assigned_to = $13,
+              fee = $14, reference_number = $15, next_action = $16, notes = $17, decision = $18, decision_status = $19,
+              investigation_outcome = $20, payment_status_override = $21, opened_at = $22, submitted_at = $23,
+              decision_at = $24, closed_at = $25, updated_at = $26
+        WHERE id = $1`,
+      values,
+    );
+  }
+}
+
+async function insertChecklistItem(caseId: string, item: ChecklistItem, position: number) {
+  await sql(
+    `INSERT INTO case_checklist_items (case_id, code, position, label, status, note, document_ids, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [caseId, item.code, position, item.label, item.status, item.note ?? null, item.documentIds, item.updatedAt],
+  );
+}
+
+async function touchCase(caseId: string) {
+  await sql('UPDATE cases SET updated_at = $2 WHERE id = $1', [caseId, nowIso()]);
 }
 
 export interface CreateCaseInput {
@@ -273,13 +439,14 @@ export interface CreateCaseInput {
   customChecklist?: string[];
 }
 
-export function createCase(input: CreateCaseInput): CaseRecord | undefined {
-  const client = getClient(input.clientId);
+export async function createCase(input: CreateCaseInput): Promise<CaseRecord | undefined> {
+  const client = await getClient(input.clientId);
   if (!client) return undefined;
 
+  const config = await getConfig();
   const checklist: ChecklistItem[] = [];
   for (const code of input.checklistCodes ?? []) {
-    const label = templateLabel(code);
+    const label = templateLabel(config, code);
     if (label && !checklist.some((item) => item.code === code)) {
       checklist.push({ code, label, status: 'missing', documentIds: [], updatedAt: nowIso() });
     }
@@ -297,7 +464,7 @@ export function createCase(input: CreateCaseInput): CaseRecord | undefined {
   }
 
   const record: CaseRecord = {
-    id: nextId('CASE', 'case'),
+    id: await nextId('CASE', 'case'),
     clientId: client.id,
     title: input.title.trim(),
     office: input.office,
@@ -315,22 +482,16 @@ export function createCase(input: CreateCaseInput): CaseRecord | undefined {
     updatedAt: nowIso(),
   };
 
-  const cases = listCases();
-  cases.unshift(record);
-  writeJson(dbFile('cases'), cases);
-  logActivity({
+  await transaction(async () => {
+    await writeCase(record, 'insert');
+    for (const [index, item] of checklist.entries()) await insertChecklistItem(record.id, item, index);
+  });
+
+  await logActivity({
     type: 'case-created',
     clientId: client.id,
     caseId: record.id,
     summary: `נפתח תיק חדש "${record.title}" (${officeDisplayName(record)}) עבור ${client.fullName}`,
-  });
-  void fireEvent('case-created', {
-    caseId: record.id,
-    clientId: client.id,
-    clientName: client.fullName,
-    title: record.title,
-    office: officeDisplayName(record),
-    fee: record.fee,
   });
   return record;
 }
@@ -359,72 +520,60 @@ export interface UpdateCaseInput {
   paymentStatusOverride?: PaymentStatus | 'auto' | '';
 }
 
-export function updateCase(caseId: string, input: UpdateCaseInput) {
-  const cases = listCases();
-  const index = cases.findIndex((c) => c.id === caseId);
-  if (index === -1) return undefined;
-  const current = cases[index];
-  const previousStage = current.stage;
+export async function updateCase(caseId: string, input: UpdateCaseInput) {
+  const result = await transaction(async () => {
+    const current = await getCase(caseId, { forUpdate: true });
+    if (!current) return undefined;
+    const previousStage = current.stage;
 
-  const updated: CaseRecord = {
-    ...current,
-    ...Object.fromEntries(Object.entries(input).filter(([, v]) => v !== undefined)),
-    updatedAt: nowIso(),
-  };
-  if (input.assignedTo !== undefined) {
-    updated.assignedTo = input.assignedTo.trim() || undefined;
-  }
-  if (input.investigationOutcome === '') {
-    updated.investigationOutcome = undefined;
-  }
-  if (input.paymentStatusOverride !== undefined) {
-    updated.paymentStatusOverride =
-      input.paymentStatusOverride === 'auto' || input.paymentStatusOverride === ''
-        ? undefined
-        : input.paymentStatusOverride;
-  }
-  // A direct approval clears any previous investigation outcome.
-  if (input.decisionStatus === 'approved') {
-    updated.investigationOutcome = undefined;
-  }
+    const updated: CaseRecord = {
+      ...current,
+      ...Object.fromEntries(Object.entries(input).filter(([, v]) => v !== undefined)),
+      updatedAt: nowIso(),
+    };
+    if (input.assignedTo !== undefined) {
+      updated.assignedTo = input.assignedTo.trim() || undefined;
+    }
+    if (input.investigationOutcome === '') {
+      updated.investigationOutcome = undefined;
+    }
+    if (input.paymentStatusOverride !== undefined) {
+      updated.paymentStatusOverride =
+        input.paymentStatusOverride === 'auto' || input.paymentStatusOverride === ''
+          ? undefined
+          : input.paymentStatusOverride;
+    }
+    // A direct approval clears any previous investigation outcome.
+    if (input.decisionStatus === 'approved') {
+      updated.investigationOutcome = undefined;
+    }
+
+    if (input.stage && input.stage !== previousStage) {
+      if (input.stage === 'submitted' && !updated.submittedAt) updated.submittedAt = nowIso();
+      if (input.stage === 'decision-received' && !updated.decisionAt) updated.decisionAt = nowIso();
+      if (input.stage === 'closed' && !updated.closedAt) updated.closedAt = nowIso();
+    }
+
+    await writeCase(updated, 'update');
+    return { current, updated, previousStage };
+  });
+  if (!result) return undefined;
+  const { current, updated, previousStage } = result;
 
   if (input.stage && input.stage !== previousStage) {
-    if (input.stage === 'submitted' && !updated.submittedAt) updated.submittedAt = nowIso();
-    if (input.stage === 'decision-received' && !updated.decisionAt) updated.decisionAt = nowIso();
-    if (input.stage === 'closed' && !updated.closedAt) updated.closedAt = nowIso();
-  }
-
-  cases[index] = updated;
-  writeJson(dbFile('cases'), cases);
-
-  if (input.stage && input.stage !== previousStage) {
-    const client = getClient(updated.clientId);
-    logActivity({
+    await logActivity({
       type: 'case-stage-changed',
       clientId: updated.clientId,
       caseId,
       summary: `שלב התיק "${updated.title}" עודכן: ${STAGE_LABELS[previousStage]} ← ${STAGE_LABELS[input.stage]}`,
     });
-    void fireEvent('case-stage-changed', {
-      caseId,
-      clientId: updated.clientId,
-      clientName: client?.fullName || '',
-      clientPhone: client?.phone || '',
-      clientEmail: client?.email || '',
-      title: updated.title,
-      office: officeDisplayName(updated),
-      previousStage,
-      stage: input.stage,
-      stageLabel: STAGE_LABELS[input.stage],
-      missingItems: countMissingItems(updated),
-    });
   } else {
-    logActivity({ type: 'case-updated', clientId: updated.clientId, caseId, summary: `עודכן תיק "${updated.title}"` });
+    await logActivity({ type: 'case-updated', clientId: updated.clientId, caseId, summary: `עודכן תיק "${updated.title}"` });
   }
 
   if (input.assignedTo !== undefined && (current.assignedTo || undefined) !== updated.assignedTo) {
-    const worker = updated.assignedTo ? getWorker(updated.assignedTo) : undefined;
-    logActivity({
+    const worker = updated.assignedTo ? await getWorker(updated.assignedTo) : undefined;
+    await logActivity({
       type: 'case-assigned',
       clientId: updated.clientId,
       caseId,
@@ -440,18 +589,11 @@ export function updateCase(caseId: string, input: UpdateCaseInput) {
       updated.decisionStatus ? `החלטה: ${DECISION_LABELS[updated.decisionStatus]}` : '',
       updated.investigationOutcome ? `תוצאת חקירה: ${INVESTIGATION_OUTCOME_LABELS[updated.investigationOutcome]}` : '',
     ].filter(Boolean);
-    logActivity({
+    await logActivity({
       type: 'case-decision',
       clientId: updated.clientId,
       caseId,
       summary: `עודכנה החלטה בתיק "${updated.title}" — ${parts.join(', ') || 'נוקתה'}`,
-    });
-    void fireEvent('case-decision', {
-      caseId,
-      clientId: updated.clientId,
-      title: updated.title,
-      decisionStatus: updated.decisionStatus || '',
-      investigationOutcome: updated.investigationOutcome || '',
     });
   }
 
@@ -459,7 +601,7 @@ export function updateCase(caseId: string, input: UpdateCaseInput) {
     const label = updated.paymentStatusOverride
       ? PAYMENT_STATUS_LABELS[updated.paymentStatusOverride]
       : 'אוטומטי (לפי תשלומים)';
-    logActivity({
+    await logActivity({
       type: 'case-payment-status',
       clientId: updated.clientId,
       caseId,
@@ -468,20 +610,13 @@ export function updateCase(caseId: string, input: UpdateCaseInput) {
   }
 
   if (input.troubleFlag !== undefined && Boolean(current.troubleFlag) !== Boolean(input.troubleFlag)) {
-    logActivity({
+    await logActivity({
       type: 'case-trouble-flag',
       clientId: updated.clientId,
       caseId,
       summary: input.troubleFlag
         ? `🚩 התיק "${updated.title}" סומן כתקוע / נדרשת השלמה${input.troubleNote ? `: ${input.troubleNote}` : ''}`
         : `הוסרה התראת הבעיה מהתיק "${updated.title}"`,
-    });
-    void fireEvent('case-trouble-flag', {
-      caseId,
-      clientId: updated.clientId,
-      title: updated.title,
-      troubleFlag: Boolean(input.troubleFlag),
-      troubleNote: updated.troubleNote || '',
     });
   }
 
@@ -490,142 +625,158 @@ export function updateCase(caseId: string, input: UpdateCaseInput) {
 
 // ── Checklist ────────────────────────────────────────────────────────────────
 
-export function addChecklistItem(caseId: string, label: string, code?: string) {
-  const cases = listCases();
-  const index = cases.findIndex((c) => c.id === caseId);
-  if (index === -1) return undefined;
-  const caseRecord = cases[index];
+export async function addChecklistItem(caseId: string, label: string, code?: string) {
+  const config = await getConfig();
+  const added = await transaction(async () => {
+    const caseRecord = await getCase(caseId, { forUpdate: true });
+    if (!caseRecord) return undefined;
 
-  const tmplLabel = code ? templateLabel(code) : undefined;
-  const item: ChecklistItem = {
-    code: code && tmplLabel ? code : `custom-${crypto.randomUUID().slice(0, 8)}`,
-    label: tmplLabel ?? label.trim(),
-    status: 'missing',
-    documentIds: [],
-    updatedAt: nowIso(),
-  };
-  if (!item.label) return undefined;
-  if (caseRecord.checklist.some((existing) => existing.code === item.code)) return undefined;
+    const tmplLabel = code ? templateLabel(config, code) : undefined;
+    const item: ChecklistItem = {
+      code: code && tmplLabel ? code : `custom-${crypto.randomUUID().slice(0, 8)}`,
+      label: tmplLabel ?? label.trim(),
+      status: 'missing',
+      documentIds: [],
+      updatedAt: nowIso(),
+    };
+    if (!item.label) return undefined;
+    if (caseRecord.checklist.some((existing) => existing.code === item.code)) return undefined;
 
-  caseRecord.checklist.push(item);
-  caseRecord.updatedAt = nowIso();
-  cases[index] = caseRecord;
-  writeJson(dbFile('cases'), cases);
-  logActivity({ type: 'checklist-item-added', clientId: caseRecord.clientId, caseId, summary: `נוסף מסמך נדרש: ${item.label}` });
-  return item;
+    const position = await sqlOne<{ next: number }>(
+      'SELECT COALESCE(MAX(position) + 1, 0) AS next FROM case_checklist_items WHERE case_id = $1',
+      [caseId],
+    );
+    await insertChecklistItem(caseId, item, position!.next);
+    await touchCase(caseId);
+    return { item, clientId: caseRecord.clientId };
+  });
+  if (!added) return undefined;
+  await logActivity({ type: 'checklist-item-added', clientId: added.clientId, caseId, summary: `נוסף מסמך נדרש: ${added.item.label}` });
+  return added.item;
 }
 
-export function updateChecklistItem(
+export async function updateChecklistItem(
   caseId: string,
   code: string,
   input: { status?: ChecklistStatus; note?: string; label?: string },
 ) {
-  const cases = listCases();
-  const index = cases.findIndex((c) => c.id === caseId);
-  if (index === -1) return undefined;
-  const caseRecord = cases[index];
-  const item = caseRecord.checklist.find((i) => i.code === code);
-  if (!item) return undefined;
+  const result = await transaction(async () => {
+    const caseRecord = await getCase(caseId, { forUpdate: true });
+    if (!caseRecord) return undefined;
+    const item = caseRecord.checklist.find((i) => i.code === code);
+    if (!item) return undefined;
 
-  if (input.status) item.status = input.status;
-  if (input.note !== undefined) item.note = input.note.trim() || undefined;
-  if (input.label !== undefined && input.label.trim()) item.label = input.label.trim();
-  item.updatedAt = nowIso();
-  caseRecord.updatedAt = nowIso();
-  cases[index] = caseRecord;
-  writeJson(dbFile('cases'), cases);
+    if (input.status) item.status = input.status;
+    if (input.note !== undefined) item.note = input.note.trim() || undefined;
+    if (input.label !== undefined && input.label.trim()) item.label = input.label.trim();
+    item.updatedAt = nowIso();
+    await sql(
+      'UPDATE case_checklist_items SET status = $3, note = $4, label = $5, updated_at = $6 WHERE case_id = $1 AND code = $2',
+      [caseId, code, item.status, item.note ?? null, item.label, item.updatedAt],
+    );
+    await touchCase(caseId);
+    return { item, clientId: caseRecord.clientId };
+  });
+  if (!result) return undefined;
 
   if (input.status) {
-    logActivity({
+    await logActivity({
       type: 'checklist-status-updated',
-      clientId: caseRecord.clientId,
+      clientId: result.clientId,
       caseId,
-      summary: `סטטוס "${item.label}" עודכן`,
+      summary: `סטטוס "${result.item.label}" עודכן`,
     });
   }
-  return item;
+  return result.item;
 }
 
-export function removeChecklistItem(caseId: string, code: string) {
-  return removeChecklistItems(caseId, [code]) > 0;
+export async function removeChecklistItem(caseId: string, code: string) {
+  return (await removeChecklistItems(caseId, [code])) > 0;
 }
 
 /** Remove several checklist items at once; returns how many were removed. */
-export function removeChecklistItems(caseId: string, codes: string[]) {
-  const cases = listCases();
-  const index = cases.findIndex((c) => c.id === caseId);
-  if (index === -1) return 0;
-  const set = new Set(codes);
-  const caseRecord = cases[index];
-  const before = caseRecord.checklist.length;
-  caseRecord.checklist = caseRecord.checklist.filter((i) => !set.has(i.code));
-  const removed = before - caseRecord.checklist.length;
+export async function removeChecklistItems(caseId: string, codes: string[]) {
+  const caseRecord = await getCase(caseId);
+  if (!caseRecord) return 0;
+  const removed = await sqlCount('DELETE FROM case_checklist_items WHERE case_id = $1 AND code = ANY($2)', [
+    caseId,
+    codes,
+  ]);
   if (removed > 0) {
-    caseRecord.updatedAt = nowIso();
-    cases[index] = caseRecord;
-    writeJson(dbFile('cases'), cases);
-    logActivity({ type: 'checklist-items-removed', clientId: caseRecord.clientId, caseId, summary: `הוסרו ${removed} מסמכים מרשימת התיק` });
+    await touchCase(caseId);
+    await logActivity({ type: 'checklist-items-removed', clientId: caseRecord.clientId, caseId, summary: `הוסרו ${removed} מסמכים מרשימת התיק` });
   }
   return removed;
 }
 
 /** Empty the whole checklist of a case; returns how many were removed. */
-export function clearChecklist(caseId: string) {
-  const cases = listCases();
-  const index = cases.findIndex((c) => c.id === caseId);
-  if (index === -1) return 0;
-  const removed = cases[index].checklist.length;
+export async function clearChecklist(caseId: string) {
+  const caseRecord = await getCase(caseId);
+  if (!caseRecord) return 0;
+  const removed = await sqlCount('DELETE FROM case_checklist_items WHERE case_id = $1', [caseId]);
   if (removed > 0) {
-    cases[index].checklist = [];
-    cases[index].updatedAt = nowIso();
-    writeJson(dbFile('cases'), cases);
-    logActivity({ type: 'checklist-cleared', clientId: cases[index].clientId, caseId, summary: 'נוקתה רשימת המסמכים הנדרשים' });
+    await touchCase(caseId);
+    await logActivity({ type: 'checklist-cleared', clientId: caseRecord.clientId, caseId, summary: 'נוקתה רשימת המסמכים הנדרשים' });
   }
   return removed;
 }
 
 /** Delete a case and cascade: its documents (files + records), payments, task links. */
-export function deleteCase(caseId: string) {
-  const record = getCase(caseId);
-  if (!record) return false;
+export async function deleteCase(caseId: string) {
+  return transaction(async () => {
+    const record = await getCase(caseId, { forUpdate: true });
+    if (!record) return false;
 
-  for (const doc of listCaseDocuments(caseId)) deleteDocument(doc.id);
+    for (const doc of await listCaseDocuments(caseId)) await deleteDocument(doc.id);
+    await sql('DELETE FROM payments WHERE case_id = $1', [caseId]);
+    await sql('UPDATE tasks SET case_id = NULL WHERE case_id = $1', [caseId]);
+    await sql('DELETE FROM cases WHERE id = $1', [caseId]);
 
-  const payments = listPayments();
-  const remainingPayments = payments.filter((p) => p.caseId !== caseId);
-  if (remainingPayments.length !== payments.length) writeJson(dbFile('payments'), remainingPayments);
-
-  const tasks = listTasks();
-  let tasksChanged = false;
-  for (const t of tasks) {
-    if (t.caseId === caseId) {
-      t.caseId = undefined;
-      tasksChanged = true;
-    }
-  }
-  if (tasksChanged) writeJson(dbFile('tasks'), tasks);
-
-  writeJson(dbFile('cases'), listCases().filter((c) => c.id !== caseId));
-  logActivity({ type: 'case-deleted', clientId: record.clientId, summary: `נמחק תיק "${record.title}"` });
-  return true;
+    await logActivity({ type: 'case-deleted', clientId: record.clientId, summary: `נמחק תיק "${record.title}"` });
+    return true;
+  });
 }
 
 // ── Documents ────────────────────────────────────────────────────────────────
 
-export function listDocuments(): DocumentRecord[] {
-  return readJson<DocumentRecord[]>(dbFile('documents'), []);
+function toDocument(row: Row): DocumentRecord {
+  return {
+    id: row.id,
+    clientId: row.client_id,
+    caseId: opt(row.case_id),
+    fileName: row.file_name,
+    originalName: row.original_name,
+    label: opt(row.label),
+    mimeType: row.mime_type,
+    size: Number(row.size),
+    uploadedAt: iso(row.uploaded_at),
+    updatedAt: iso(row.updated_at),
+    editedFromId: opt(row.edited_from_id),
+  };
 }
 
-export function getDocument(documentId: string) {
-  return listDocuments().find((d) => d.id === documentId);
+const DOCUMENT_ORDER = 'ORDER BY uploaded_at DESC, length(id) DESC, id DESC';
+
+export async function listDocuments(): Promise<DocumentRecord[]> {
+  return (await sql(`SELECT * FROM documents ${DOCUMENT_ORDER}`)).map(toDocument);
 }
 
-export function listClientDocuments(clientId: string) {
-  return listDocuments().filter((d) => d.clientId === clientId);
+export async function getDocument(documentId: string) {
+  const row = await sqlOne('SELECT * FROM documents WHERE id = $1', [documentId]);
+  return row ? toDocument(row) : undefined;
 }
 
-export function listCaseDocuments(caseId: string) {
-  return listDocuments().filter((d) => d.caseId === caseId);
+export async function getDocuments(documentIds: string[]) {
+  if (!documentIds.length) return [];
+  return (await sql(`SELECT * FROM documents WHERE id = ANY($1) ${DOCUMENT_ORDER}`, [documentIds])).map(toDocument);
+}
+
+export async function listClientDocuments(clientId: string) {
+  return (await sql(`SELECT * FROM documents WHERE client_id = $1 ${DOCUMENT_ORDER}`, [clientId])).map(toDocument);
+}
+
+export async function listCaseDocuments(caseId: string) {
+  return (await sql(`SELECT * FROM documents WHERE case_id = $1 ${DOCUMENT_ORDER}`, [caseId])).map(toDocument);
 }
 
 function sanitizeFileName(name: string) {
@@ -634,7 +785,7 @@ function sanitizeFileName(name: string) {
 }
 
 export function documentFilePath(record: Pick<DocumentRecord, 'clientId' | 'fileName'>) {
-  return path.join(clientDocumentsFolder(record.clientId), record.fileName);
+  return path.join(clientDocumentsFolder(record.clientId), safeSegment(path.basename(record.fileName)));
 }
 
 export interface SaveDocumentInput {
@@ -649,16 +800,22 @@ export interface SaveDocumentInput {
   checklistCode?: string;
 }
 
-export function saveDocument(input: SaveDocumentInput): DocumentRecord | undefined {
-  const client = getClient(input.clientId);
+export async function saveDocument(input: SaveDocumentInput): Promise<DocumentRecord | undefined> {
+  const client = await getClient(input.clientId);
   if (!client) return undefined;
+  // A case id from the form must belong to this client.
+  if (input.caseId) {
+    const caseRow = await sqlOne('SELECT client_id FROM cases WHERE id = $1', [input.caseId]);
+    if (!caseRow || caseRow.client_id !== input.clientId) return undefined;
+  }
 
-  const id = nextId('DOC', 'document');
+  const id = await nextId('DOC', 'document');
   const safeName = sanitizeFileName(input.originalName);
   const fileName = `${id}-${safeName}`;
   const folder = clientDocumentsFolder(input.clientId);
   fs.mkdirSync(folder, { recursive: true });
-  fs.writeFileSync(path.join(folder, fileName), input.buffer);
+  const filePath = path.join(folder, fileName);
+  fs.writeFileSync(filePath, input.buffer);
 
   const record: DocumentRecord = {
     id,
@@ -674,28 +831,49 @@ export function saveDocument(input: SaveDocumentInput): DocumentRecord | undefin
     editedFromId: input.editedFromId,
   };
 
-  const documents = listDocuments();
-  documents.unshift(record);
-  writeJson(dbFile('documents'), documents);
-
   let checklistLabel = '';
-  if (input.caseId && input.checklistCode) {
-    const cases = listCases();
-    const index = cases.findIndex((c) => c.id === input.caseId);
-    if (index !== -1) {
-      const item = cases[index].checklist.find((i) => i.code === input.checklistCode);
-      if (item) {
-        item.documentIds.push(record.id);
-        if (item.status === 'missing' || item.status === 'resubmit-needed') item.status = 'received';
-        item.updatedAt = nowIso();
-        cases[index].updatedAt = nowIso();
-        writeJson(dbFile('cases'), cases);
-        checklistLabel = item.label;
-      }
-    }
+  try {
+    checklistLabel = await transaction(async () => {
+      await sql(
+        `INSERT INTO documents (id, client_id, case_id, file_name, original_name, label, mime_type, size, uploaded_at,
+                                updated_at, edited_from_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        [
+          record.id,
+          record.clientId,
+          record.caseId ?? null,
+          record.fileName,
+          record.originalName,
+          record.label ?? null,
+          record.mimeType,
+          record.size,
+          record.uploadedAt,
+          record.updatedAt,
+          record.editedFromId ?? null,
+        ],
+      );
+
+      if (!input.caseId || !input.checklistCode) return '';
+      const item = await sqlOne(
+        `UPDATE case_checklist_items
+            SET document_ids = array_append(document_ids, $3),
+                status = CASE WHEN status IN ('missing', 'resubmit-needed') THEN 'received' ELSE status END,
+                updated_at = $4
+          WHERE case_id = $1 AND code = $2
+          RETURNING label`,
+        [input.caseId, input.checklistCode, record.id, nowIso()],
+      );
+      if (!item) return '';
+      await touchCase(input.caseId);
+      return item.label as string;
+    });
+  } catch (error) {
+    // The row never landed — don't leave an orphan file behind.
+    fs.rmSync(filePath, { force: true });
+    throw error;
   }
 
-  logActivity({
+  await logActivity({
     type: record.editedFromId ? 'document-edited' : 'document-uploaded',
     clientId: input.clientId,
     caseId: input.caseId,
@@ -703,61 +881,60 @@ export function saveDocument(input: SaveDocumentInput): DocumentRecord | undefin
       ? `נשמרה גרסה ערוכה של מסמך: ${record.label || record.originalName}`
       : `הועלה מסמך: ${record.label || record.originalName}${checklistLabel ? ` (${checklistLabel})` : ''}`,
   });
-  void fireEvent('document-uploaded', {
-    documentId: record.id,
-    clientId: input.clientId,
-    clientName: client.fullName,
-    caseId: input.caseId || '',
-    fileName: record.originalName,
-    checklistItem: checklistLabel,
-    edited: Boolean(record.editedFromId),
-  });
   return record;
 }
 
-export function updateDocumentMeta(documentId: string, input: { label?: string; caseId?: string | null }) {
-  const documents = listDocuments();
-  const index = documents.findIndex((d) => d.id === documentId);
-  if (index === -1) return undefined;
-  const record = documents[index];
-  if (input.label !== undefined) record.label = input.label.trim() || undefined;
-  if (input.caseId !== undefined) record.caseId = input.caseId || undefined;
-  record.updatedAt = nowIso();
-  documents[index] = record;
-  writeJson(dbFile('documents'), documents);
-  return record;
-}
-
-export function deleteDocument(documentId: string) {
-  const documents = listDocuments();
-  const record = documents.find((d) => d.id === documentId);
-  if (!record) return false;
-
-  const filePath = documentFilePath(record);
-  if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-  writeJson(dbFile('documents'), documents.filter((d) => d.id !== documentId));
-
-  // Unlink from any checklist items.
-  const cases = listCases();
-  let casesChanged = false;
-  for (const caseRecord of cases) {
-    for (const item of caseRecord.checklist) {
-      if (item.documentIds.includes(documentId)) {
-        item.documentIds = item.documentIds.filter((id) => id !== documentId);
-        item.updatedAt = nowIso();
-        casesChanged = true;
+export async function updateDocumentMeta(documentId: string, input: { label?: string; caseId?: string | null }) {
+  return transaction(async () => {
+    const row = await sqlOne('SELECT * FROM documents WHERE id = $1 FOR UPDATE', [documentId]);
+    if (!row) return undefined;
+    const record = toDocument(row);
+    if (input.label !== undefined) record.label = input.label.trim() || undefined;
+    if (input.caseId !== undefined) {
+      if (input.caseId) {
+        const caseRow = await sqlOne('SELECT client_id FROM cases WHERE id = $1', [input.caseId]);
+        if (!caseRow || caseRow.client_id !== record.clientId) return undefined;
       }
+      record.caseId = input.caseId || undefined;
     }
-  }
-  if (casesChanged) writeJson(dbFile('cases'), cases);
-
-  logActivity({
-    type: 'document-deleted',
-    clientId: record.clientId,
-    caseId: record.caseId,
-    summary: `נמחק מסמך: ${record.label || record.originalName}`,
+    record.updatedAt = nowIso();
+    await sql('UPDATE documents SET label = $2, case_id = $3, updated_at = $4 WHERE id = $1', [
+      documentId,
+      record.label ?? null,
+      record.caseId ?? null,
+      record.updatedAt,
+    ]);
+    return record;
   });
-  return true;
+}
+
+export async function deleteDocument(documentId: string) {
+  return transaction(async () => {
+    const row = await sqlOne('SELECT * FROM documents WHERE id = $1 FOR UPDATE', [documentId]);
+    if (!row) return false;
+    const record = toDocument(row);
+
+    await sql('DELETE FROM documents WHERE id = $1', [documentId]);
+    // Unlink from any checklist items.
+    await sql(
+      `UPDATE case_checklist_items SET document_ids = array_remove(document_ids, $1), updated_at = $2
+        WHERE $1 = ANY(document_ids)`,
+      [documentId, nowIso()],
+    );
+
+    const filePath = documentFilePath(record);
+    afterCommit(() => {
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    });
+
+    await logActivity({
+      type: 'document-deleted',
+      clientId: record.clientId,
+      caseId: record.caseId,
+      summary: `נמחק מסמך: ${record.label || record.originalName}`,
+    });
+    return true;
+  });
 }
 
 export function readDocumentFile(record: Pick<DocumentRecord, 'clientId' | 'fileName'>) {
@@ -766,66 +943,60 @@ export function readDocumentFile(record: Pick<DocumentRecord, 'clientId' | 'file
   return fs.readFileSync(filePath);
 }
 
-export type SendChannel = 'email' | 'whatsapp' | 'sms';
+export type SendChannel = DeliveryChannel;
+
+const CHANNEL_LABEL: Record<SendChannel, string> = { email: 'אימייל', whatsapp: 'וואטסאפ' };
 
 /**
  * Send one or more documents to their client as a single secure, expiring
- * download link via n8n. All documents must belong to the same client.
- * Returns the generated link on success.
+ * download link by email (Resend) or WhatsApp (Meta). All documents must
+ * belong to the same client. Returns the link on success.
  */
 export async function sendDocumentsLink(documentIds: string[], channel: SendChannel) {
   const ids = Array.from(new Set(documentIds.filter(Boolean)));
   if (!ids.length) return { ok: false as const, error: 'לא נבחרו מסמכים' };
 
-  const docs = ids.map((id) => getDocument(id)).filter((d): d is DocumentRecord => Boolean(d));
+  const docs = await getDocuments(ids);
   if (!docs.length) return { ok: false as const, error: 'המסמכים לא נמצאו' };
 
   const clientId = docs[0].clientId;
   if (docs.some((d) => d.clientId !== clientId)) {
     return { ok: false as const, error: 'לא ניתן לשלוח מסמכים של לקוחות שונים בקישור אחד' };
   }
-  const client = getClient(clientId);
+  const client = await getClient(clientId);
   if (!client) return { ok: false as const, error: 'הלקוח לא נמצא' };
 
   if (channel === 'email' && !client.email) return { ok: false as const, error: 'ללקוח אין כתובת אימייל' };
-  if ((channel === 'whatsapp' || channel === 'sms') && !client.phone) {
-    return { ok: false as const, error: 'ללקוח אין מספר טלפון' };
+  if (channel === 'whatsapp' && !client.phone) return { ok: false as const, error: 'ללקוח אין מספר טלפון' };
+  if (!directChannelAvailable(channel)) {
+    return {
+      ok: false as const,
+      error:
+        channel === 'email'
+          ? 'שליחת אימייל לא הוגדרה — יש להגדיר RESEND_API_KEY ו-EMAIL_FROM'
+          : 'שליחת וואטסאפ לא הוגדרה — יש להגדיר WHATSAPP_ACCESS_TOKEN ו-WHATSAPP_PHONE_NUMBER_ID',
+    };
   }
 
   const token = signShareToken(docs.map((d) => d.id), 14);
-  const link = `${env.appBaseUrl.replace(/\/$/, '')}/api/share/${token}`;
-  const label =
-    docs.length === 1 ? docs[0].label || docs[0].originalName : `${docs.length} מסמכים`;
+  const link = `${env.appBaseUrl}/api/share/${token}`;
+  const label = docs.length === 1 ? docs[0].label || docs[0].originalName : `${docs.length} מסמכים`;
+  const { businessName } = await getConfig();
 
-  logActivity({
+  const result = await deliver({
+    channel,
+    to: { email: client.email, phone: client.phone },
+    message: documentsLinkMessage({ businessName, clientName: client.fullName, label, link, days: 14 }),
+    relatedId: clientId,
+  });
+  if (!result.ok) return { ok: false as const, error: `השליחה נכשלה: ${result.error}` };
+
+  await logActivity({
     type: 'document-sent',
     clientId,
     caseId: docs[0].caseId,
-    summary: `נשלח קישור ל${label} ל${client.fullName} דרך ${REMINDER_LABEL[channel]}`,
+    summary: `נשלח קישור ל${label} ל${client.fullName} דרך ${CHANNEL_LABEL[channel]}`,
   });
-
-  const result = await fireEvent('send-document', {
-    documentIds: docs.map((d) => d.id),
-    documentCount: docs.length,
-    channel,
-    clientName: client.fullName,
-    clientEmail: client.email || '',
-    clientPhone: client.phone || '',
-    fileName: docs.length === 1 ? docs[0].originalName : `${docs.length} מסמכים`,
-    documentLabel: label,
-    link,
-    expiresInDays: 14,
-    businessName: getConfig().businessName,
-  });
-  if (!result.ok) {
-    // Surface why n8n refused — usually the workflow is inactive (404) or the
-    // base URL points at /webhook-test with no listener armed.
-    const detail = 'error' in result && result.error ? ` (${result.error})` : '';
-    const hint = /404/.test(detail)
-      ? ' — ודא שהוורקפלואו "שליחת מסמך ללקוח" פעיל ב-n8n ושהנתיב הוא crmye/send-document'
-      : '';
-    return { ok: false as const, error: `שליחת ההודעה דרך n8n נכשלה${detail}${hint}` };
-  }
   return { ok: true as const, link };
 }
 
@@ -834,20 +1005,33 @@ export async function sendDocumentLink(documentId: string, channel: SendChannel)
   return sendDocumentsLink([documentId], channel);
 }
 
-const REMINDER_LABEL: Record<SendChannel, string> = { email: 'אימייל', whatsapp: 'וואטסאפ', sms: 'SMS' };
-
 // ── Payments ─────────────────────────────────────────────────────────────────
 
-export function listPayments(): PaymentRecord[] {
-  return readJson<PaymentRecord[]>(dbFile('payments'), []);
+function toPayment(row: Row): PaymentRecord {
+  return {
+    id: row.id,
+    clientId: row.client_id,
+    caseId: opt(row.case_id),
+    amount: Number(row.amount),
+    method: row.method as PaymentMethod,
+    paidAt: iso(row.paid_at),
+    note: opt(row.note),
+    createdAt: iso(row.created_at),
+  };
 }
 
-export function listCasePayments(caseId: string) {
-  return listPayments().filter((p) => p.caseId === caseId);
+const PAYMENT_ORDER = 'ORDER BY created_at DESC, length(id) DESC, id DESC';
+
+export async function listPayments(): Promise<PaymentRecord[]> {
+  return (await sql(`SELECT * FROM payments ${PAYMENT_ORDER}`)).map(toPayment);
 }
 
-export function listClientPayments(clientId: string) {
-  return listPayments().filter((p) => p.clientId === clientId);
+export async function listCasePayments(caseId: string) {
+  return (await sql(`SELECT * FROM payments WHERE case_id = $1 ${PAYMENT_ORDER}`, [caseId])).map(toPayment);
+}
+
+export async function listClientPayments(clientId: string) {
+  return (await sql(`SELECT * FROM payments WHERE client_id = $1 ${PAYMENT_ORDER}`, [clientId])).map(toPayment);
 }
 
 export interface CreatePaymentInput {
@@ -859,68 +1043,77 @@ export interface CreatePaymentInput {
   note?: string;
 }
 
-export function createPayment(input: CreatePaymentInput): PaymentRecord | undefined {
-  const client = getClient(input.clientId);
+export async function createPayment(input: CreatePaymentInput): Promise<PaymentRecord | undefined> {
+  const client = await getClient(input.clientId);
   if (!client) return undefined;
   if (!Number.isFinite(input.amount) || input.amount <= 0) return undefined;
+  const caseRecord = input.caseId ? await getCase(input.caseId) : undefined;
+  if (input.caseId && (!caseRecord || caseRecord.clientId !== input.clientId)) return undefined;
 
   const record: PaymentRecord = {
-    id: nextId('PAY', 'payment'),
+    id: await nextId('PAY', 'payment'),
     clientId: input.clientId,
     caseId: input.caseId,
     amount: Math.round(input.amount * 100) / 100,
     method: input.method,
-    paidAt: input.paidAt || nowIso(),
+    paidAt: input.paidAt ? iso(input.paidAt) : nowIso(),
     note: input.note?.trim() || undefined,
     createdAt: nowIso(),
   };
 
-  const payments = listPayments();
-  payments.unshift(record);
-  writeJson(dbFile('payments'), payments);
+  await sql(
+    `INSERT INTO payments (id, client_id, case_id, amount, method, paid_at, note, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [record.id, record.clientId, record.caseId ?? null, record.amount, record.method, record.paidAt, record.note ?? null, record.createdAt],
+  );
 
-  const caseRecord = input.caseId ? getCase(input.caseId) : undefined;
-  logActivity({
+  await logActivity({
     type: 'payment-recorded',
     clientId: input.clientId,
     caseId: input.caseId,
     summary: `נרשם תשלום של ₪${record.amount.toLocaleString()} מ${client.fullName}${caseRecord ? ` (תיק "${caseRecord.title}")` : ''}`,
   });
-  void fireEvent('payment-recorded', {
-    paymentId: record.id,
-    clientId: client.id,
-    clientName: client.fullName,
-    caseId: input.caseId || '',
-    caseTitle: caseRecord?.title || '',
-    amount: record.amount,
-    method: record.method,
-    paidAt: record.paidAt,
-  });
   return record;
 }
 
-export function updatePayment(
+export async function updatePayment(
   paymentId: string,
   input: { amount?: number; method?: PaymentMethod; paidAt?: string; note?: string; caseId?: string | null },
 ) {
-  const payments = listPayments();
-  const index = payments.findIndex((p) => p.id === paymentId);
-  if (index === -1) return undefined;
-  const record = payments[index];
-  const previousAmount = record.amount;
+  const result = await transaction(async () => {
+    const row = await sqlOne('SELECT * FROM payments WHERE id = $1 FOR UPDATE', [paymentId]);
+    if (!row) return undefined;
+    const record = toPayment(row);
+    const previousAmount = record.amount;
 
-  if (input.amount !== undefined) {
-    if (!Number.isFinite(input.amount) || input.amount <= 0) return undefined;
-    record.amount = Math.round(input.amount * 100) / 100;
-  }
-  if (input.method) record.method = input.method;
-  if (input.paidAt) record.paidAt = input.paidAt;
-  if (input.note !== undefined) record.note = input.note.trim() || undefined;
-  if (input.caseId !== undefined) record.caseId = input.caseId || undefined;
+    if (input.amount !== undefined) {
+      if (!Number.isFinite(input.amount) || input.amount <= 0) return undefined;
+      record.amount = Math.round(input.amount * 100) / 100;
+    }
+    if (input.method) record.method = input.method;
+    if (input.paidAt) record.paidAt = iso(input.paidAt);
+    if (input.note !== undefined) record.note = input.note.trim() || undefined;
+    if (input.caseId !== undefined) {
+      if (input.caseId) {
+        const caseRow = await sqlOne('SELECT client_id FROM cases WHERE id = $1', [input.caseId]);
+        if (!caseRow || caseRow.client_id !== record.clientId) return undefined;
+      }
+      record.caseId = input.caseId || undefined;
+    }
 
-  payments[index] = record;
-  writeJson(dbFile('payments'), payments);
-  logActivity({
+    await sql('UPDATE payments SET amount = $2, method = $3, paid_at = $4, note = $5, case_id = $6 WHERE id = $1', [
+      paymentId,
+      record.amount,
+      record.method,
+      record.paidAt,
+      record.note ?? null,
+      record.caseId ?? null,
+    ]);
+    return { record, previousAmount };
+  });
+  if (!result) return undefined;
+  const { record, previousAmount } = result;
+  await logActivity({
     type: 'payment-updated',
     clientId: record.clientId,
     caseId: record.caseId,
@@ -932,12 +1125,11 @@ export function updatePayment(
   return record;
 }
 
-export function deletePayment(paymentId: string) {
-  const payments = listPayments();
-  const record = payments.find((p) => p.id === paymentId);
-  if (!record) return false;
-  writeJson(dbFile('payments'), payments.filter((p) => p.id !== paymentId));
-  logActivity({
+export async function deletePayment(paymentId: string) {
+  const row = await sqlOne('DELETE FROM payments WHERE id = $1 RETURNING *', [paymentId]);
+  if (!row) return false;
+  const record = toPayment(row);
+  await logActivity({
     type: 'payment-deleted',
     clientId: record.clientId,
     caseId: record.caseId,
@@ -958,12 +1150,13 @@ export interface CaseFinance {
   overridden: boolean;
 }
 
+/** Finance for one case, given the payments to count (all payments, or the case's own). */
 export function getCaseFinance(
   caseRecord: Pick<CaseRecord, 'id' | 'fee' | 'paymentStatusOverride'>,
-  payments?: PaymentRecord[],
+  payments: PaymentRecord[],
 ): CaseFinance {
-  const casePayments = (payments ?? listPayments()).filter((p) => p.caseId === caseRecord.id);
-  const paid = casePayments.reduce((sum, p) => sum + p.amount, 0);
+  const casePayments = payments.filter((p) => p.caseId === caseRecord.id);
+  const paid = Math.round(casePayments.reduce((sum, p) => sum + p.amount, 0) * 100) / 100;
   let balance = Math.max(0, Math.round((caseRecord.fee - paid) * 100) / 100);
   let status: PaymentStatus =
     caseRecord.fee <= 0 && paid <= 0 ? 'unpaid' : paid <= 0 ? 'unpaid' : paid < caseRecord.fee ? 'partial' : 'paid';
@@ -981,14 +1174,12 @@ export function getCaseFinance(
   return { caseId: caseRecord.id, fee: caseRecord.fee, paid, balance, status, overridden: Boolean(override) };
 }
 
-export function getDashboardSummary(caseFilter?: (caseRecord: CaseRecord) => boolean) {
-  const allCases = listCases();
+export async function getDashboardSummary(caseFilter?: (caseRecord: CaseRecord) => boolean) {
+  const [allCases, allClients, payments] = await Promise.all([listCases(), listClients(), listPayments()]);
   const cases = caseFilter ? allCases.filter(caseFilter) : allCases;
-  const allClients = listClients();
   const clients = caseFilter
     ? allClients.filter((client) => cases.some((c) => c.clientId === client.id))
     : allClients;
-  const payments = listPayments();
 
   const byStage: Record<string, number> = {};
   for (const stage of Object.keys(STAGE_LABELS)) byStage[stage] = 0;
@@ -1025,27 +1216,42 @@ export function getDashboardSummary(caseFilter?: (caseRecord: CaseRecord) => boo
 
 // ── Workers ──────────────────────────────────────────────────────────────────
 
-export function listWorkers(): WorkerRecord[] {
-  return readJson<WorkerRecord[]>(dbFile('workers'), []);
+function toPerson(row: Row) {
+  return {
+    id: row.id as string,
+    name: row.name as string,
+    email: row.email as string,
+    phone: opt(row.phone) as string | undefined,
+    passwordHash: row.password_hash as string,
+    active: Boolean(row.active),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+  };
 }
 
-export function getWorker(workerId: string) {
-  return listWorkers().find((w) => w.id === workerId);
+export async function listWorkers(): Promise<WorkerRecord[]> {
+  return (await sql('SELECT * FROM workers ORDER BY created_at DESC, length(id) DESC, id DESC')).map(toPerson);
 }
 
-export function getWorkerByEmail(email: string) {
-  const normalized = email.trim().toLowerCase();
-  return listWorkers().find((w) => w.email.toLowerCase() === normalized);
+export async function getWorker(workerId: string): Promise<WorkerRecord | undefined> {
+  const row = await sqlOne('SELECT * FROM workers WHERE id = $1', [workerId]);
+  return row ? toPerson(row) : undefined;
 }
 
-export function createWorker(input: { name: string; email: string; passwordHash: string; phone?: string }): WorkerRecord | undefined {
+export async function getWorkerByEmail(email: string): Promise<WorkerRecord | undefined> {
+  const row = await sqlOne('SELECT * FROM workers WHERE lower(email) = lower($1)', [email.trim()]);
+  return row ? toPerson(row) : undefined;
+}
+
+export async function createWorker(input: { name: string; email: string; passwordHash: string; phone?: string }): Promise<WorkerRecord | undefined> {
   const name = input.name.trim();
   const email = input.email.trim().toLowerCase();
   if (!name || !email || !input.passwordHash) return undefined;
-  if (getWorkerByEmail(email)) return undefined;
+  // Emails must be unique across admins and workers (both log in with email).
+  if ((await getWorkerByEmail(email)) || (await getAdminByEmail(email))) return undefined;
 
   const record: WorkerRecord = {
-    id: nextId('WRK', 'worker', 100),
+    id: await nextId('WRK', 'worker', 100),
     name,
     email,
     phone: input.phone?.trim() || undefined,
@@ -1054,55 +1260,74 @@ export function createWorker(input: { name: string; email: string; passwordHash:
     createdAt: nowIso(),
     updatedAt: nowIso(),
   };
-  const workers = listWorkers();
-  workers.unshift(record);
-  writeJson(dbFile('workers'), workers);
-  logActivity({ type: 'worker-created', summary: `נוסף עובד חדש: ${name} (${email})` });
+  await sql(
+    `INSERT INTO workers (id, name, email, phone, password_hash, active, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [record.id, record.name, record.email, record.phone ?? null, record.passwordHash, record.active, record.createdAt, record.updatedAt],
+  );
+  await logActivity({ type: 'worker-created', summary: `נוסף עובד חדש: ${name} (${email})` });
   return record;
 }
 
-export function updateWorker(workerId: string, input: { name?: string; active?: boolean; passwordHash?: string; phone?: string }) {
-  const workers = listWorkers();
-  const index = workers.findIndex((w) => w.id === workerId);
-  if (index === -1) return undefined;
-  const record = workers[index];
+async function updatePerson(
+  table: 'workers' | 'admins',
+  id: string,
+  input: { name?: string; active?: boolean; passwordHash?: string; phone?: string },
+) {
+  const row = await sqlOne(`SELECT * FROM ${table} WHERE id = $1`, [id]);
+  if (!row) return undefined;
+  const record = toPerson(row);
   if (input.name?.trim()) record.name = input.name.trim();
   if (input.active !== undefined) record.active = input.active;
   if (input.passwordHash) record.passwordHash = input.passwordHash;
   if (input.phone !== undefined) record.phone = input.phone.trim() || undefined;
   record.updatedAt = nowIso();
-  workers[index] = record;
-  writeJson(dbFile('workers'), workers);
-  if (input.active !== undefined) {
-    logActivity({ type: 'worker-updated', summary: `עובד ${record.name} ${input.active ? 'הופעל' : 'הושבת'}` });
+  await sql(`UPDATE ${table} SET name = $2, active = $3, password_hash = $4, phone = $5, updated_at = $6 WHERE id = $1`, [
+    id,
+    record.name,
+    record.active,
+    record.passwordHash,
+    record.phone ?? null,
+    record.updatedAt,
+  ]);
+  // Deactivation or a new password ends every open session of that account.
+  if (input.active === false || input.passwordHash) await revokeAccountSessions(id);
+  return record;
+}
+
+export async function updateWorker(workerId: string, input: { name?: string; active?: boolean; passwordHash?: string; phone?: string }) {
+  const record = await updatePerson('workers', workerId, input);
+  if (record && input.active !== undefined) {
+    await logActivity({ type: 'worker-updated', summary: `עובד ${record.name} ${input.active ? 'הופעל' : 'הושבת'}` });
   }
   return record;
 }
 
 // ── Admin accounts (additional admins beyond the root .env admin) ───────────
 
-export function listAdmins(): AdminRecord[] {
-  return readJson<AdminRecord[]>(dbFile('admins'), []);
+export async function listAdmins(): Promise<AdminRecord[]> {
+  return (await sql('SELECT * FROM admins ORDER BY created_at DESC, length(id) DESC, id DESC')).map(toPerson);
 }
 
-export function getAdmin(adminId: string) {
-  return listAdmins().find((a) => a.id === adminId);
+export async function getAdmin(adminId: string): Promise<AdminRecord | undefined> {
+  const row = await sqlOne('SELECT * FROM admins WHERE id = $1', [adminId]);
+  return row ? toPerson(row) : undefined;
 }
 
-export function getAdminByEmail(email: string) {
-  const normalized = email.trim().toLowerCase();
-  return listAdmins().find((a) => a.email.toLowerCase() === normalized);
+export async function getAdminByEmail(email: string): Promise<AdminRecord | undefined> {
+  const row = await sqlOne('SELECT * FROM admins WHERE lower(email) = lower($1)', [email.trim()]);
+  return row ? toPerson(row) : undefined;
 }
 
-export function createAdmin(input: { name: string; email: string; passwordHash: string; phone?: string }): AdminRecord | undefined {
+export async function createAdmin(input: { name: string; email: string; passwordHash: string; phone?: string }): Promise<AdminRecord | undefined> {
   const name = input.name.trim();
   const email = input.email.trim().toLowerCase();
   if (!name || !email || !input.passwordHash) return undefined;
   // Emails must be unique across admins and workers (both log in with email).
-  if (getAdminByEmail(email) || getWorkerByEmail(email)) return undefined;
+  if ((await getAdminByEmail(email)) || (await getWorkerByEmail(email))) return undefined;
 
   const record: AdminRecord = {
-    id: nextId('ADM', 'admin', 10),
+    id: await nextId('ADM', 'admin', 10),
     name,
     email,
     phone: input.phone?.trim() || undefined,
@@ -1111,127 +1336,120 @@ export function createAdmin(input: { name: string; email: string; passwordHash: 
     createdAt: nowIso(),
     updatedAt: nowIso(),
   };
-  const admins = listAdmins();
-  admins.unshift(record);
-  writeJson(dbFile('admins'), admins);
-  logActivity({ type: 'admin-created', summary: `נוסף מנהל נוסף: ${name} (${email})` });
+  await sql(
+    `INSERT INTO admins (id, name, email, phone, password_hash, active, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [record.id, record.name, record.email, record.phone ?? null, record.passwordHash, record.active, record.createdAt, record.updatedAt],
+  );
+  await logActivity({ type: 'admin-created', summary: `נוסף מנהל נוסף: ${name} (${email})` });
   return record;
 }
 
-export function updateAdmin(adminId: string, input: { name?: string; active?: boolean; passwordHash?: string; phone?: string }) {
-  const admins = listAdmins();
-  const index = admins.findIndex((a) => a.id === adminId);
-  if (index === -1) return undefined;
-  const record = admins[index];
-  if (input.name?.trim()) record.name = input.name.trim();
-  if (input.active !== undefined) record.active = input.active;
-  if (input.passwordHash) record.passwordHash = input.passwordHash;
-  if (input.phone !== undefined) record.phone = input.phone.trim() || undefined;
-  record.updatedAt = nowIso();
-  admins[index] = record;
-  writeJson(dbFile('admins'), admins);
-  if (input.active !== undefined) {
-    logActivity({ type: 'admin-updated', summary: `מנהל ${record.name} ${input.active ? 'הופעל' : 'הושבת'}` });
+export async function updateAdmin(adminId: string, input: { name?: string; active?: boolean; passwordHash?: string; phone?: string }) {
+  const record = await updatePerson('admins', adminId, input);
+  if (record && input.active !== undefined) {
+    await logActivity({ type: 'admin-updated', summary: `מנהל ${record.name} ${input.active ? 'הופעל' : 'הושבת'}` });
   }
   return record;
 }
 
-// ── Password reset codes (delivered via n8n: email / SMS / WhatsApp) ─────────
-
-interface ResetRecord {
-  id: string;
-  accountType: 'admin' | 'worker';
-  accountId: string;
-  email: string;
-  codeHash: string;
-  expiresAt: string;
-  attempts: number;
-  createdAt: string;
-}
+// ── Password reset codes (email / WhatsApp) ──────────────────────────────────
 
 const RESET_TTL_MS = 15 * 60 * 1000;
 const RESET_COOLDOWN_MS = 60 * 1000;
 const RESET_MAX_ATTEMPTS = 5;
+/** Codes per account per day — stops someone cycling fresh codes to brute-force. */
+const RESET_DAILY_LIMIT = 6;
 
 function hashResetCode(code: string) {
   return crypto.createHash('sha256').update(`crmye-reset:${code}`).digest('hex');
 }
 
-function readResets(): ResetRecord[] {
-  const now = Date.now();
-  return readJson<ResetRecord[]>(dbFile('resets'), []).filter((r) => new Date(r.expiresAt).getTime() > now);
-}
-
 /**
  * Creates a reset code for the account behind `email` (admin or worker) and
- * fires the crmye/password-reset n8n event with the requested channel.
- * Always behaves the same externally so emails can't be enumerated.
+ * delivers it on the requested channel. Always behaves the same externally so
+ * emails can't be enumerated.
  */
-export async function requestPasswordReset(email: string, channel: 'email' | 'sms' | 'whatsapp') {
+export async function requestPasswordReset(email: string, channel: DeliveryChannel) {
   const normalized = email.trim().toLowerCase();
-  const admin = getAdminByEmail(normalized);
-  const worker = admin ? undefined : getWorkerByEmail(normalized);
+  const admin = await getAdminByEmail(normalized);
+  const worker = admin ? undefined : await getWorkerByEmail(normalized);
   const account = admin ?? worker;
   if (!account || !account.active) return { ok: true, sent: false } as const;
+  if (!directChannelAvailable(channel)) return { ok: true, sent: false } as const;
 
-  const resets = readResets();
-  const recent = resets.find(
-    (r) => r.email === normalized && Date.now() - new Date(r.createdAt).getTime() < RESET_COOLDOWN_MS,
-  );
+  await sql('DELETE FROM password_resets WHERE expires_at < now()');
+  const recent = await sqlOne('SELECT 1 FROM password_resets WHERE email = $1 AND created_at > $2', [
+    normalized,
+    new Date(Date.now() - RESET_COOLDOWN_MS).toISOString(),
+  ]);
   if (recent) return { ok: true, sent: false } as const;
+  if (!(await consumeRateLimit(`reset-daily:${normalized}`, RESET_DAILY_LIMIT, 24 * 60 * 60))) {
+    return { ok: true, sent: false } as const;
+  }
 
   const code = String(crypto.randomInt(100000, 1000000));
-  const record: ResetRecord = {
-    id: crypto.randomUUID(),
-    accountType: admin ? 'admin' : 'worker',
-    accountId: account.id,
-    email: normalized,
-    codeHash: hashResetCode(code),
-    expiresAt: new Date(Date.now() + RESET_TTL_MS).toISOString(),
-    attempts: 0,
-    createdAt: nowIso(),
-  };
-  // One active reset per email.
-  writeJson(dbFile('resets'), [...resets.filter((r) => r.email !== normalized), record]);
+  await transaction(async () => {
+    // One active reset per email.
+    await sql('DELETE FROM password_resets WHERE email = $1', [normalized]);
+    await sql(
+      `INSERT INTO password_resets (id, account_type, account_id, email, code_hash, expires_at, attempts, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 0, $7)`,
+      [
+        crypto.randomUUID(),
+        admin ? 'admin' : 'worker',
+        account.id,
+        normalized,
+        hashResetCode(code),
+        new Date(Date.now() + RESET_TTL_MS).toISOString(),
+        nowIso(),
+      ],
+    );
+  });
 
-  logActivity({ type: 'password-reset-requested', summary: `התבקש איפוס סיסמה עבור ${account.name}` });
-  await fireEvent('password-reset', {
+  await logActivity({ type: 'password-reset-requested', summary: `התבקש איפוס סיסמה עבור ${account.name}` });
+
+  const { businessName } = await getConfig();
+  await deliver({
     channel,
-    code,
-    name: account.name,
-    email: account.email,
-    phone: account.phone || '',
-    expiresMinutes: 15,
+    to: { email: account.email, phone: account.phone },
+    message: passwordResetMessage({ businessName, name: account.name, code, minutes: 15 }),
+    relatedId: account.id,
   });
   return { ok: true, sent: true } as const;
 }
 
 /** Verifies the code and sets the new password hash. Consumes the reset on success. */
-export function completePasswordReset(email: string, code: string, newPasswordHash: string) {
+export async function completePasswordReset(email: string, code: string, newPasswordHash: string) {
   const normalized = email.trim().toLowerCase();
-  const resets = readResets();
-  const record = resets.find((r) => r.email === normalized);
-  if (!record) return { ok: false, error: 'קוד לא תקין או שפג תוקפו' } as const;
+  const outcome = await transaction(async () => {
+    const record = await sqlOne('SELECT * FROM password_resets WHERE email = $1 AND expires_at > now() FOR UPDATE', [normalized]);
+    if (!record) return { ok: false, error: 'קוד לא תקין או שפג תוקפו' } as const;
 
-  if (record.attempts >= RESET_MAX_ATTEMPTS) {
-    writeJson(dbFile('resets'), resets.filter((r) => r.id !== record.id));
-    return { ok: false, error: 'יותר מדי ניסיונות — בקש קוד חדש' } as const;
-  }
+    if (record.attempts >= RESET_MAX_ATTEMPTS) {
+      await sql('DELETE FROM password_resets WHERE id = $1', [record.id]);
+      return { ok: false, error: 'יותר מדי ניסיונות — בקש קוד חדש' } as const;
+    }
 
-  if (record.codeHash !== hashResetCode(code.trim())) {
-    record.attempts += 1;
-    writeJson(dbFile('resets'), resets);
-    return { ok: false, error: 'קוד שגוי' } as const;
-  }
+    const given = Buffer.from(hashResetCode(code.trim()));
+    const expected = Buffer.from(String(record.code_hash));
+    if (given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) {
+      await sql('UPDATE password_resets SET attempts = attempts + 1 WHERE id = $1', [record.id]);
+      return { ok: false, error: 'קוד שגוי' } as const;
+    }
+
+    await sql('DELETE FROM password_resets WHERE id = $1', [record.id]);
+    return { ok: true, accountType: record.account_type as 'admin' | 'worker', accountId: record.account_id as string } as const;
+  });
+  if (!outcome.ok) return outcome;
 
   const updated =
-    record.accountType === 'admin'
-      ? updateAdmin(record.accountId, { passwordHash: newPasswordHash })
-      : updateWorker(record.accountId, { passwordHash: newPasswordHash });
-  writeJson(dbFile('resets'), resets.filter((r) => r.id !== record.id));
+    outcome.accountType === 'admin'
+      ? await updateAdmin(outcome.accountId, { passwordHash: newPasswordHash })
+      : await updateWorker(outcome.accountId, { passwordHash: newPasswordHash });
   if (!updated) return { ok: false, error: 'החשבון לא נמצא' } as const;
 
-  logActivity({ type: 'password-reset-completed', summary: `אופסה סיסמה עבור ${updated.name}` });
+  await logActivity({ type: 'password-reset-completed', summary: `אופסה סיסמה עבור ${updated.name}` });
   return { ok: true } as const;
 }
 
@@ -1244,39 +1462,71 @@ export function caseVisibleTo(caseRecord: Pick<CaseRecord, 'openedBy' | 'assigne
   return caseRecord.openedBy === viewer.workerId || caseRecord.assignedTo === viewer.workerId;
 }
 
-export function listVisibleCases(viewer: Viewer) {
-  const cases = listCases();
-  if (viewer.role === 'admin') return cases;
-  return cases.filter((c) => caseVisibleTo(c, viewer));
+export async function listVisibleCases(viewer: Viewer) {
+  if (viewer.role === 'admin') return listCases();
+  return queryCases('WHERE opened_by = $1 OR assigned_to = $1', [viewer.workerId]);
 }
 
-export function clientVisibleTo(client: Pick<ClientRecord, 'id' | 'createdBy'>, viewer: Viewer) {
+export async function clientVisibleTo(client: Pick<ClientRecord, 'id' | 'createdBy'>, viewer: Viewer) {
   if (viewer.role === 'admin') return true;
   if (client.createdBy === viewer.workerId) return true;
-  return listCases().some((c) => c.clientId === client.id && caseVisibleTo(c, viewer));
+  const row = await sqlOne('SELECT 1 FROM cases WHERE client_id = $1 AND (opened_by = $2 OR assigned_to = $2) LIMIT 1', [
+    client.id,
+    viewer.workerId,
+  ]);
+  return Boolean(row);
 }
 
-export function listVisibleClients(viewer: Viewer) {
-  const clients = listClients();
-  if (viewer.role === 'admin') return clients;
-  const visibleClientIds = new Set(listVisibleCases(viewer).map((c) => c.clientId));
-  return clients.filter((c) => c.createdBy === viewer.workerId || visibleClientIds.has(c.id));
+export async function listVisibleClients(viewer: Viewer) {
+  if (viewer.role === 'admin') return listClients();
+  const rows = await sql(
+    `SELECT * FROM clients c
+      WHERE c.created_by = $1
+         OR EXISTS (SELECT 1 FROM cases k WHERE k.client_id = c.id AND (k.opened_by = $1 OR k.assigned_to = $1))
+      ${CLIENT_ORDER}`,
+    [viewer.workerId],
+  );
+  return rows.map(toClient);
 }
 
-export function documentVisibleTo(doc: Pick<DocumentRecord, 'clientId'>, viewer: Viewer) {
+export async function documentVisibleTo(doc: Pick<DocumentRecord, 'clientId'>, viewer: Viewer) {
   if (viewer.role === 'admin') return true;
-  const client = getClient(doc.clientId);
-  return Boolean(client && clientVisibleTo(client, viewer));
+  const client = await getClient(doc.clientId);
+  return Boolean(client && (await clientVisibleTo(client, viewer)));
 }
 
 // ── Tasks & reminders ────────────────────────────────────────────────────────
 
-export function listTasks(): TaskRecord[] {
-  return readJson<TaskRecord[]>(dbFile('tasks'), []);
+export function toTask(row: Row): TaskRecord {
+  return {
+    id: row.id,
+    title: row.title,
+    notes: opt(row.notes),
+    dueAt: isoOpt(row.due_at),
+    remindAt: isoOpt(row.remind_at),
+    reminderChannels: (row.reminder_channels ?? []) as ReminderChannel[],
+    reminderSentAt: isoOpt(row.reminder_sent_at),
+    priority: row.priority as TaskPriority,
+    assigneeId: row.assignee_id,
+    clientId: opt(row.client_id),
+    caseId: opt(row.case_id),
+    status: row.status,
+    createdBy: row.created_by,
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+    completedAt: isoOpt(row.completed_at),
+  };
 }
 
-export function getTask(taskId: string) {
-  return listTasks().find((t) => t.id === taskId);
+const TASK_ORDER = 'ORDER BY created_at DESC, length(id) DESC, id DESC';
+
+export async function listTasks(): Promise<TaskRecord[]> {
+  return (await sql(`SELECT * FROM tasks ${TASK_ORDER}`)).map(toTask);
+}
+
+export async function getTask(taskId: string) {
+  const row = await sqlOne('SELECT * FROM tasks WHERE id = $1', [taskId]);
+  return row ? toTask(row) : undefined;
 }
 
 export function taskVisibleTo(task: Pick<TaskRecord, 'assigneeId' | 'createdBy'>, viewer: Viewer) {
@@ -1284,20 +1534,19 @@ export function taskVisibleTo(task: Pick<TaskRecord, 'assigneeId' | 'createdBy'>
   return task.assigneeId === viewer.workerId || task.createdBy === viewer.workerId;
 }
 
-export function listVisibleTasks(viewer: Viewer) {
-  const tasks = listTasks();
-  if (viewer.role === 'admin') return tasks;
-  return tasks.filter((t) => taskVisibleTo(t, viewer));
+export async function listVisibleTasks(viewer: Viewer) {
+  if (viewer.role === 'admin') return listTasks();
+  return (await sql(`SELECT * FROM tasks WHERE assignee_id = $1 OR created_by = $1 ${TASK_ORDER}`, [viewer.workerId])).map(toTask);
 }
 
-/** Contact details for a task assignee ('admin' or a worker id). */
-export function assigneeContact(assigneeId: string) {
+/** Contact details for a task assignee ('admin', an extra admin ADM-x, or a worker id). */
+export async function assigneeContact(assigneeId: string) {
   if (assigneeId === 'admin') {
     return { id: 'admin', name: 'מנהל', email: env.adminEmail, phone: env.adminPhone || '' };
   }
-  const worker = getWorker(assigneeId);
-  if (!worker) return { id: assigneeId, name: assigneeId, email: '', phone: '' };
-  return { id: worker.id, name: worker.name, email: worker.email, phone: worker.phone || '' };
+  const person = assigneeId.startsWith('ADM-') ? await getAdmin(assigneeId) : await getWorker(assigneeId);
+  if (!person) return { id: assigneeId, name: assigneeId, email: '', phone: '' };
+  return { id: person.id, name: person.name, email: person.email, phone: person.phone || '' };
 }
 
 export interface CreateTaskInput {
@@ -1313,16 +1562,16 @@ export interface CreateTaskInput {
   createdBy: string;
 }
 
-export function createTask(input: CreateTaskInput): TaskRecord | undefined {
+export async function createTask(input: CreateTaskInput): Promise<TaskRecord | undefined> {
   const title = input.title.trim();
   if (!title) return undefined;
 
   const record: TaskRecord = {
-    id: nextId('TASK', 'task'),
+    id: await nextId('TASK', 'task'),
     title,
     notes: input.notes?.trim() || undefined,
-    dueAt: input.dueAt || undefined,
-    remindAt: input.remindAt || undefined,
+    dueAt: input.dueAt ? iso(input.dueAt) : undefined,
+    remindAt: input.remindAt ? iso(input.remindAt) : undefined,
     reminderChannels: input.reminderChannels?.filter((c) => c === 'email' || c === 'whatsapp') ?? [],
     priority: input.priority ?? 'normal',
     assigneeId: input.assigneeId || 'admin',
@@ -1334,33 +1583,59 @@ export function createTask(input: CreateTaskInput): TaskRecord | undefined {
     updatedAt: nowIso(),
   };
 
-  const tasks = listTasks();
-  tasks.unshift(record);
-  writeJson(dbFile('tasks'), tasks);
+  await sql(
+    `INSERT INTO tasks (id, title, notes, due_at, remind_at, reminder_channels, priority, assignee_id, client_id,
+                        case_id, status, created_by, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+    [
+      record.id,
+      record.title,
+      record.notes ?? null,
+      record.dueAt ?? null,
+      record.remindAt ?? null,
+      record.reminderChannels,
+      record.priority,
+      record.assigneeId,
+      nul(record.clientId),
+      nul(record.caseId),
+      record.status,
+      record.createdBy,
+      record.createdAt,
+      record.updatedAt,
+    ],
+  );
 
-  const assignee = assigneeContact(record.assigneeId);
-  logActivity({
+  const assignee = await assigneeContact(record.assigneeId);
+  await logActivity({
     type: 'task-created',
     clientId: record.clientId,
     caseId: record.caseId,
     summary: `נוצרה משימה: "${record.title}" (${assignee.name})`,
   });
   if (record.assigneeId !== record.createdBy) {
-    void fireEvent('task-assigned', {
-      taskId: record.id,
-      title: record.title,
-      notes: record.notes || '',
-      dueAt: record.dueAt || '',
-      priority: record.priority,
-      assigneeId: assignee.id,
-      assigneeName: assignee.name,
-      assigneeEmail: assignee.email,
-      assigneePhone: assignee.phone,
-      caseId: record.caseId || '',
-      clientId: record.clientId || '',
-    });
+    await notifyTaskAssigned(record, assignee);
   }
   return record;
+}
+
+/** Tell the assignee about a new task on every channel that is set up and reachable. */
+async function notifyTaskAssigned(record: TaskRecord, assignee: Awaited<ReturnType<typeof assigneeContact>>) {
+  const channels = (['email', 'whatsapp'] as const).filter(
+    (channel) => directChannelAvailable(channel) && (channel === 'email' ? assignee.email : assignee.phone),
+  );
+  if (!channels.length) return;
+  const { businessName } = await getConfig();
+  const message = taskAssignedMessage({
+    businessName,
+    assigneeName: assignee.name,
+    title: record.title,
+    dueAt: record.dueAt,
+    notes: record.notes,
+    link: `${env.appBaseUrl}/tasks`,
+  });
+  for (const channel of channels) {
+    void deliver({ channel, to: { email: assignee.email, phone: assignee.phone }, message, relatedId: record.id });
+  }
 }
 
 export interface UpdateTaskInput {
@@ -1374,83 +1649,86 @@ export interface UpdateTaskInput {
   status?: 'open' | 'done';
 }
 
-export function updateTask(taskId: string, input: UpdateTaskInput) {
-  const tasks = listTasks();
-  const index = tasks.findIndex((t) => t.id === taskId);
-  if (index === -1) return undefined;
-  const record = tasks[index];
+export async function updateTask(taskId: string, input: UpdateTaskInput) {
+  const result = await transaction(async () => {
+    const row = await sqlOne('SELECT * FROM tasks WHERE id = $1 FOR UPDATE', [taskId]);
+    if (!row) return undefined;
+    const record = toTask(row);
+    let rearmed = false;
+    let statusChanged = false;
 
-  if (input.title?.trim()) record.title = input.title.trim();
-  if (input.notes !== undefined) record.notes = input.notes.trim() || undefined;
-  if (input.dueAt !== undefined) record.dueAt = input.dueAt || undefined;
-  if (input.remindAt !== undefined) {
-    record.remindAt = input.remindAt || undefined;
-    // Rescheduling a reminder re-arms it.
-    record.reminderSentAt = undefined;
-  }
-  if (input.reminderChannels) record.reminderChannels = input.reminderChannels;
-  if (input.priority) record.priority = input.priority;
-  if (input.assigneeId) record.assigneeId = input.assigneeId;
-  if (input.status && input.status !== record.status) {
-    record.status = input.status;
-    record.completedAt = input.status === 'done' ? nowIso() : undefined;
-    logActivity({
-      type: input.status === 'done' ? 'task-completed' : 'task-reopened',
+    if (input.title?.trim()) record.title = input.title.trim();
+    if (input.notes !== undefined) record.notes = input.notes.trim() || undefined;
+    if (input.dueAt !== undefined) record.dueAt = input.dueAt ? iso(input.dueAt) : undefined;
+    if (input.remindAt !== undefined) {
+      record.remindAt = input.remindAt ? iso(input.remindAt) : undefined;
+      // Rescheduling a reminder re-arms it.
+      record.reminderSentAt = undefined;
+      rearmed = true;
+    }
+    if (input.reminderChannels) record.reminderChannels = input.reminderChannels.filter((c) => c === 'email' || c === 'whatsapp');
+    if (input.priority) record.priority = input.priority;
+    if (input.assigneeId) record.assigneeId = input.assigneeId;
+    if (input.status && input.status !== record.status) {
+      record.status = input.status;
+      record.completedAt = input.status === 'done' ? nowIso() : undefined;
+      statusChanged = true;
+    }
+    record.updatedAt = nowIso();
+
+    await sql(
+      `UPDATE tasks SET title = $2, notes = $3, due_at = $4, remind_at = $5, reminder_channels = $6,
+              reminder_sent_at = $7, priority = $8, assignee_id = $9, status = $10, updated_at = $11, completed_at = $12,
+              reminder_attempts = CASE WHEN $13 THEN 0 ELSE reminder_attempts END
+        WHERE id = $1`,
+      [
+        taskId,
+        record.title,
+        record.notes ?? null,
+        record.dueAt ?? null,
+        record.remindAt ?? null,
+        record.reminderChannels,
+        record.reminderSentAt ?? null,
+        record.priority,
+        record.assigneeId,
+        record.status,
+        record.updatedAt,
+        record.completedAt ?? null,
+        rearmed,
+      ],
+    );
+    return { record, statusChanged };
+  });
+  if (!result) return undefined;
+  const { record, statusChanged } = result;
+  if (statusChanged) {
+    await logActivity({
+      type: record.status === 'done' ? 'task-completed' : 'task-reopened',
       clientId: record.clientId,
       caseId: record.caseId,
-      summary: input.status === 'done' ? `הושלמה משימה: "${record.title}"` : `נפתחה מחדש משימה: "${record.title}"`,
+      summary: record.status === 'done' ? `הושלמה משימה: "${record.title}"` : `נפתחה מחדש משימה: "${record.title}"`,
     });
   }
-  record.updatedAt = nowIso();
-  tasks[index] = record;
-  writeJson(dbFile('tasks'), tasks);
   return record;
 }
 
-export function deleteTask(taskId: string) {
-  const tasks = listTasks();
-  const record = tasks.find((t) => t.id === taskId);
-  if (!record) return false;
-  writeJson(dbFile('tasks'), tasks.filter((t) => t.id !== taskId));
-  return true;
+export async function deleteTask(taskId: string) {
+  return (await sqlCount('DELETE FROM tasks WHERE id = $1', [taskId])) > 0;
 }
 
-/**
- * Open tasks whose reminder time has arrived and was not sent yet.
- * Used by the n8n polling workflow; with markSent the tasks are flagged so
- * they are returned exactly once.
- */
-export function listDueReminders(markSent: boolean) {
-  const tasks = listTasks();
-  const now = Date.now();
-  const due = tasks.filter(
-    (t) => t.status === 'open' && t.remindAt && !t.reminderSentAt && new Date(t.remindAt).getTime() <= now,
-  );
-  if (markSent && due.length) {
-    for (const task of due) task.reminderSentAt = nowIso();
-    writeJson(dbFile('tasks'), tasks);
-  }
-  return due.map((task) => {
-    const assignee = assigneeContact(task.assigneeId);
-    const client = task.clientId ? getClient(task.clientId) : undefined;
-    const caseRecord = task.caseId ? getCase(task.caseId) : undefined;
-    return {
-      taskId: task.id,
-      title: task.title,
-      notes: task.notes || '',
-      dueAt: task.dueAt || '',
-      remindAt: task.remindAt || '',
-      priority: task.priority,
-      channels: task.reminderChannels,
-      assigneeName: assignee.name,
-      assigneeEmail: assignee.email,
-      assigneePhone: assignee.phone,
-      clientName: client?.fullName || '',
-      caseTitle: caseRecord?.title || '',
-      caseId: task.caseId || '',
-      link: `${env.appBaseUrl}/tasks`,
-    };
-  });
+/** Who a reminder goes to and what it is about (used by lib/reminders.ts). */
+export async function reminderContext(task: TaskRecord) {
+  const [assignee, client, caseRecord] = await Promise.all([
+    assigneeContact(task.assigneeId),
+    task.clientId ? getClient(task.clientId) : undefined,
+    task.caseId ? getCase(task.caseId) : undefined,
+  ]);
+  return {
+    assignee,
+    clientName: client?.fullName,
+    caseTitle: caseRecord?.title,
+    link: `${env.appBaseUrl}/tasks`,
+  };
 }
 
 // ── Settings (blank rent-contract template, etc.) ────────────────────────────
@@ -1468,18 +1746,30 @@ function templatesFolder() {
   return path.join(dataRoot(), 'templates');
 }
 
-export function getSettings(): AppSettings {
-  return readJson<AppSettings>(dbFile('settings'), {});
+async function readKv<T>(key: string, fallback: T): Promise<T> {
+  const row = await sqlOne<{ value: T }>('SELECT value FROM app_kv WHERE key = $1', [key]);
+  return row ? row.value : fallback;
 }
 
-function saveSettings(settings: AppSettings) {
-  writeJson(dbFile('settings'), settings);
+async function writeKv(key: string, value: unknown) {
+  await sql(
+    `INSERT INTO app_kv (key, value, updated_at) VALUES ($1, $2, now())
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+    [key, JSON.stringify(value)],
+  );
+}
+
+export async function getSettings(): Promise<AppSettings> {
+  return readKv<AppSettings>('settings', {});
+}
+
+async function saveSettings(settings: AppSettings) {
+  await writeKv('settings', settings);
 }
 
 // ── App configuration (fully editable from the Settings page) ────────────────
 
-export function getConfig(): AppConfig {
-  const saved = readJson<Partial<AppConfig>>(dbFile('config'), {});
+function mergeConfig(saved: Partial<AppConfig>): AppConfig {
   return {
     ...DEFAULT_APP_CONFIG,
     ...saved,
@@ -1491,33 +1781,38 @@ export function getConfig(): AppConfig {
   };
 }
 
-export function saveConfig(patch: Partial<AppConfig>): AppConfig {
-  const saved = readJson<Partial<AppConfig>>(dbFile('config'), {});
-  const next: Partial<AppConfig> = { ...saved, ...patch };
-  if (patch.stageLabels) {
-    next.stageLabels = { ...(saved.stageLabels ?? {}), ...patch.stageLabels };
-  }
-  writeJson(dbFile('config'), next);
-  logActivity({ type: 'config-updated', summary: 'עודכנו הגדרות המערכת' });
-  return getConfig();
+export async function getConfig(): Promise<AppConfig> {
+  return mergeConfig(await readKv<Partial<AppConfig>>('config', {}));
+}
+
+export async function saveConfig(patch: Partial<AppConfig>): Promise<AppConfig> {
+  const next = await transaction(async () => {
+    await sql("SELECT pg_advisory_xact_lock(hashtext('crmye-config'))");
+    const saved = await readKv<Partial<AppConfig>>('config', {});
+    const merged: Partial<AppConfig> = { ...saved, ...patch };
+    if (patch.stageLabels) {
+      merged.stageLabels = { ...(saved.stageLabels ?? {}), ...patch.stageLabels };
+    }
+    await writeKv('config', merged);
+    return merged;
+  });
+  await logActivity({ type: 'config-updated', summary: 'עודכנו הגדרות המערכת' });
+  return mergeConfig(next);
 }
 
 /** Resolve a checklist-template label from config, falling back to the built-in list. */
-function templateLabel(code: string): string | undefined {
+function templateLabel(config: AppConfig, code: string): string | undefined {
   return (
-    getConfig().documentTemplates.find((t) => t.code === code)?.label ??
+    config.documentTemplates.find((t) => t.code === code)?.label ??
     documentTemplates.find((t) => t.code === code)?.label
   );
 }
 
-export function saveBlankContract(input: { originalName: string; mimeType: string; buffer: Buffer }) {
-  const settings = getSettings();
-  // Remove the previous template file, if any.
-  if (settings.blankContract) {
-    const oldPath = path.join(templatesFolder(), settings.blankContract.fileName);
-    if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
-  }
-  const safeName = `blank-contract-${Date.now()}${path.extname(input.originalName) || ''}`;
+export async function saveBlankContract(input: { originalName: string; mimeType: string; buffer: Buffer }) {
+  const settings = await getSettings();
+  const previous = settings.blankContract;
+  const extension = path.extname(path.basename(input.originalName)).replace(/[^.\w]/g, '');
+  const safeName = `blank-contract-${Date.now()}${extension}`;
   fs.mkdirSync(templatesFolder(), { recursive: true });
   fs.writeFileSync(path.join(templatesFolder(), safeName), input.buffer);
   settings.blankContract = {
@@ -1526,25 +1821,30 @@ export function saveBlankContract(input: { originalName: string; mimeType: strin
     mimeType: input.mimeType || 'application/octet-stream',
     uploadedAt: nowIso(),
   };
-  saveSettings(settings);
-  logActivity({ type: 'settings-updated', summary: 'הועלה טופס חוזה שכירות ריק חדש' });
+  await saveSettings(settings);
+  // Remove the previous template file only once the new one is recorded.
+  if (previous) {
+    const oldPath = path.join(templatesFolder(), path.basename(previous.fileName));
+    if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+  }
+  await logActivity({ type: 'settings-updated', summary: 'הועלה טופס חוזה שכירות ריק חדש' });
   return settings.blankContract;
 }
 
-export function readBlankContract() {
-  const settings = getSettings();
+export async function readBlankContract() {
+  const settings = await getSettings();
   if (!settings.blankContract) return undefined;
-  const filePath = path.join(templatesFolder(), settings.blankContract.fileName);
+  const filePath = path.join(templatesFolder(), path.basename(settings.blankContract.fileName));
   if (!fs.existsSync(filePath)) return undefined;
   return { meta: settings.blankContract, buffer: fs.readFileSync(filePath) };
 }
 
-export function deleteBlankContract() {
-  const settings = getSettings();
+export async function deleteBlankContract() {
+  const settings = await getSettings();
   if (!settings.blankContract) return false;
-  const filePath = path.join(templatesFolder(), settings.blankContract.fileName);
-  if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  const filePath = path.join(templatesFolder(), path.basename(settings.blankContract.fileName));
   delete settings.blankContract;
-  saveSettings(settings);
+  await saveSettings(settings);
+  if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
   return true;
 }
