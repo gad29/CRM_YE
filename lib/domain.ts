@@ -116,6 +116,14 @@ export const COMPANY_LABELS: Record<OperatingCompany, string> = {
   'none': 'ללא / אחר',
 };
 
+/** Default colour per operating company — each gets its own, distinct from
+ *  the red/green/orange used for status. Editable in Settings. */
+export const COMPANY_COLORS: Record<string, string> = {
+  milgam: '#7c3aed',
+  alonim: '#0d9488',
+  maof: '#db2777',
+};
+
 export type CaseKind = 'new' | 'renewal';
 
 export const CASE_KIND_LABELS: Record<CaseKind, string> = {
@@ -449,6 +457,8 @@ export function officeDisplayName(caseRecord: Pick<CaseRecord, 'office' | 'offic
 export interface ConfigOption {
   value: string;
   label: string;
+  /** Display colour (#rrggbb) — used for operating companies. */
+  color?: string;
 }
 
 /**
@@ -481,7 +491,9 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   defaultFee: 0,
   autoCreateCaseOnClient: true,
   seedChecklistByDefault: true,
-  companies: Object.entries(COMPANY_LABELS).map(([value, label]) => ({ value, label })),
+  companies: Object.entries(COMPANY_LABELS).map(([value, label]) =>
+    COMPANY_COLORS[value] ? { value, label, color: COMPANY_COLORS[value] } : { value, label },
+  ),
   documentTemplates: documentTemplates.map((t) => ({ code: t.code, label: t.label })),
   paymentMethods: Object.entries(PAYMENT_METHOD_LABELS).map(([value, label]) => ({ value, label })),
   offices: Object.entries(OFFICE_LABELS).map(([value, label]) => ({ value, label })),
@@ -497,4 +509,23 @@ export function optionLabel(options: ConfigOption[] | undefined, value?: string,
 /** Stage label from config, falling back to the built-in Hebrew label. */
 export function stageLabelOf(config: Pick<AppConfig, 'stageLabels'> | undefined, stage: string) {
   return config?.stageLabels?.[stage] ?? STAGE_LABELS[stage as CaseStage] ?? stage;
+}
+
+/** Colour of an operating company: the one set in Settings, else the built-in default. */
+export function companyColor(config: Pick<AppConfig, 'companies'> | undefined, company?: string) {
+  if (!company || company === 'none') return undefined;
+  return config?.companies?.find((c) => c.value === company)?.color || COMPANY_COLORS[company];
+}
+
+/**
+ * Who currently handles a case: whoever it was last transferred to, else whoever
+ * opened it. 'admin' is the manager. Workers see exactly the cases they handle.
+ */
+export function caseHandlerId(caseRecord: Pick<CaseRecord, 'assignedTo' | 'openedBy'>) {
+  return caseRecord.assignedTo || caseRecord.openedBy || 'admin';
+}
+
+/** True for a manager id: the root admin ('admin') or an additional admin (ADM-x). */
+export function isManagerId(id: string) {
+  return id === 'admin' || id.startsWith('ADM-');
 }

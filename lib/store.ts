@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {
+  caseHandlerId,
   countMissingItems,
   DECISION_LABELS,
   DEFAULT_APP_CONFIG,
@@ -572,12 +573,13 @@ export async function updateCase(caseId: string, input: UpdateCaseInput) {
   }
 
   if (input.assignedTo !== undefined && (current.assignedTo || undefined) !== updated.assignedTo) {
-    const worker = updated.assignedTo ? await getWorker(updated.assignedTo) : undefined;
+    const people = await personDirectory();
+    const nameOf = (id: string) => people.get(id)?.name ?? id;
     await logActivity({
       type: 'case-assigned',
       clientId: updated.clientId,
       caseId,
-      summary: worker ? `התיק "${updated.title}" שויך לעובד ${worker.name}` : `בוטל שיוך העובד מהתיק "${updated.title}"`,
+      summary: `התיק "${updated.title}" הועבר מ${nameOf(caseHandlerId(current))} ל${nameOf(caseHandlerId(updated))}`,
     });
   }
 
@@ -1353,6 +1355,24 @@ export async function updateAdmin(adminId: string, input: { name?: string; activ
   return record;
 }
 
+export interface PersonEntry {
+  id: string;
+  name: string;
+  role: 'admin' | 'worker';
+  active: boolean;
+}
+
+/** Everyone a case can be handled by: the manager ('admin'), extra admins, workers. */
+export async function personDirectory(): Promise<Map<string, PersonEntry>> {
+  const [admins, workers] = await Promise.all([listAdmins(), listWorkers()]);
+  const people: PersonEntry[] = [
+    { id: 'admin', name: 'מנהל', role: 'admin', active: true },
+    ...admins.map((a) => ({ id: a.id, name: a.name, role: 'admin' as const, active: a.active })),
+    ...workers.map((w) => ({ id: w.id, name: w.name, role: 'worker' as const, active: w.active })),
+  ];
+  return new Map(people.map((p) => [p.id, p]));
+}
+
 // ── Password reset codes (email / WhatsApp) ──────────────────────────────────
 
 const RESET_TTL_MS = 15 * 60 * 1000;
@@ -1457,20 +1477,21 @@ export async function completePasswordReset(email: string, code: string, newPass
 
 export type Viewer = { role: 'admin' } | { role: 'worker'; workerId: string };
 
+/** Admins see every case; a worker sees the cases they currently handle (see caseHandlerId). */
 export function caseVisibleTo(caseRecord: Pick<CaseRecord, 'openedBy' | 'assignedTo'>, viewer: Viewer) {
   if (viewer.role === 'admin') return true;
-  return caseRecord.openedBy === viewer.workerId || caseRecord.assignedTo === viewer.workerId;
+  return caseHandlerId(caseRecord) === viewer.workerId;
 }
 
 export async function listVisibleCases(viewer: Viewer) {
   if (viewer.role === 'admin') return listCases();
-  return queryCases('WHERE opened_by = $1 OR assigned_to = $1', [viewer.workerId]);
+  return queryCases('WHERE COALESCE(assigned_to, opened_by) = $1', [viewer.workerId]);
 }
 
 export async function clientVisibleTo(client: Pick<ClientRecord, 'id' | 'createdBy'>, viewer: Viewer) {
   if (viewer.role === 'admin') return true;
   if (client.createdBy === viewer.workerId) return true;
-  const row = await sqlOne('SELECT 1 FROM cases WHERE client_id = $1 AND (opened_by = $2 OR assigned_to = $2) LIMIT 1', [
+  const row = await sqlOne('SELECT 1 FROM cases WHERE client_id = $1 AND COALESCE(assigned_to, opened_by) = $2 LIMIT 1', [
     client.id,
     viewer.workerId,
   ]);
@@ -1482,7 +1503,7 @@ export async function listVisibleClients(viewer: Viewer) {
   const rows = await sql(
     `SELECT * FROM clients c
       WHERE c.created_by = $1
-         OR EXISTS (SELECT 1 FROM cases k WHERE k.client_id = c.id AND (k.opened_by = $1 OR k.assigned_to = $1))
+         OR EXISTS (SELECT 1 FROM cases k WHERE k.client_id = c.id AND COALESCE(k.assigned_to, k.opened_by) = $1)
       ${CLIENT_ORDER}`,
     [viewer.workerId],
   );

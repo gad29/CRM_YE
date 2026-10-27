@@ -1,13 +1,14 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import {
+  caseHandlerId,
   countMissingItems,
   officeDisplayName,
   type CaseKind,
   type GovernmentOffice,
   type OperatingCompany,
 } from '@/lib/domain';
-import { createCase, getCaseFinance, listClients, listPayments, listVisibleCases, listWorkers } from '@/lib/store';
+import { createCase, getCaseFinance, listClients, listPayments, listVisibleCases, personDirectory } from '@/lib/store';
 import { actorId, getViewer } from '@/lib/viewer';
 
 export async function GET() {
@@ -17,12 +18,8 @@ export async function GET() {
   const cases = await listVisibleCases(auth.viewer);
   const clients = await listClients();
   const payments = await listPayments();
-  const workers = await listWorkers();
-
-  function workerName(id?: string) {
-    if (!id || id === 'admin') return '';
-    return workers.find((w) => w.id === id)?.name || '';
-  }
+  const people = await personDirectory();
+  const nameOf = (id?: string) => (id ? people.get(id)?.name || '' : '');
 
   const enriched = cases.map((caseRecord) => {
     const client = clients.find((c) => c.id === caseRecord.clientId);
@@ -33,8 +30,9 @@ export async function GET() {
       officeName: officeDisplayName(caseRecord),
       missingItems: countMissingItems(caseRecord),
       finance: getCaseFinance(caseRecord, payments),
-      openedByName: workerName(caseRecord.openedBy),
-      assignedToName: workerName(caseRecord.assignedTo),
+      openedByName: caseRecord.openedBy === 'admin' ? '' : nameOf(caseRecord.openedBy),
+      assignedToName: nameOf(caseRecord.assignedTo),
+      handlerId: caseHandlerId(caseRecord),
     };
   });
 

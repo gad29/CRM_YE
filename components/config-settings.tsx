@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { CASE_STAGES, STAGE_LABELS, type AppConfig, type CaseStage, type ConfigOption } from '@/lib/domain';
+import { CASE_STAGES, COMPANY_COLORS, STAGE_LABELS, type AppConfig, type CaseStage, type ConfigOption } from '@/lib/domain';
 import { useConfigRefresh } from '@/components/config-provider';
 
 function SavedTag({ show }: { show: boolean }) {
@@ -9,7 +9,7 @@ function SavedTag({ show }: { show: boolean }) {
   return <span className="text-feedback-success" style={{ fontWeight: 600, fontSize: 13 }}>✓ נשמר</span>;
 }
 
-/** Editor for a {value,label} list (companies, payment methods). */
+/** Editor for a {value,label} list (companies, payment methods); withColor adds a colour per row. */
 function OptionListEditor({
   title,
   hint,
@@ -18,6 +18,7 @@ function OptionListEditor({
   onSave,
   saving,
   saved,
+  withColor = false,
 }: {
   title: string;
   hint: string;
@@ -26,8 +27,16 @@ function OptionListEditor({
   onSave: (rows: ConfigOption[]) => void;
   saving: boolean;
   saved: boolean;
+  withColor?: boolean;
 }) {
   const [rows, setRows] = useState<ConfigOption[]>(items);
+
+  function colorOf(row: ConfigOption) {
+    return row.color || COMPANY_COLORS[row.value] || '#64748b';
+  }
+  function updateColor(index: number, color: string) {
+    setRows((prev) => prev.map((r, i) => (i === index ? { ...r, color } : r)));
+  }
 
   function update(index: number, label: string) {
     setRows((prev) => prev.map((r, i) => (i === index ? { ...r, label } : r)));
@@ -48,6 +57,16 @@ function OptionListEditor({
       <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>{hint}</p>
       {rows.map((row, index) => (
         <div key={row.value} className="doc-row" style={{ gap: 8 }}>
+          {withColor && row.value !== 'none' && (
+            <input
+              type="color"
+              value={colorOf(row)}
+              onChange={(e) => updateColor(index, e.target.value)}
+              title="צבע"
+              aria-label={`צבע עבור ${row.label || 'שורה'}`}
+              className="color-swatch-input"
+            />
+          )}
           <input
             value={row.label}
             onChange={(e) => update(index, e.target.value)}
@@ -63,7 +82,13 @@ function OptionListEditor({
           type="button"
           className="button button-compact"
           disabled={saving}
-          onClick={() => onSave(rows.filter((r) => r.label.trim()))}
+          onClick={() =>
+            onSave(
+              rows
+                .filter((r) => r.label.trim())
+                .map((r) => (withColor && r.value !== 'none' ? { ...r, color: colorOf(r) } : r)),
+            )
+          }
         >
           {saving ? 'שומר…' : 'שמור'}
         </button>
@@ -300,9 +325,10 @@ export function ConfigSettings() {
       <OptionListEditor
         key={`companies-${config.companies.length}`}
         title="חברות מטפלות"
-        hint="החברות שדרכן מטופלים התיקים (מילגם, אלונים, מעוף, ועוד)."
+        hint="החברות שדרכן מטופלים התיקים (מילגם, אלונים, מעוף, ועוד). הצבע מסמן את תיקי החברה ברשימות ובלוח."
         items={config.companies}
         keyPrefix="co"
+        withColor
         saving={savingSection === 'companies'}
         saved={savedSection === 'companies'}
         onSave={(rows) => save({ companies: rows }, 'companies')}

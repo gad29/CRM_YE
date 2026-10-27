@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { countMissingItems } from '@/lib/domain';
+import { caseHandlerId, countMissingItems } from '@/lib/domain';
 import {
   caseVisibleTo,
   clientVisibleTo,
@@ -12,7 +12,7 @@ import {
   listClientDocuments,
   listClientPayments,
   listPayments,
-  listWorkers,
+  personDirectory,
   updateClient,
 } from '@/lib/store';
 import { getViewer } from '@/lib/viewer';
@@ -30,16 +30,17 @@ export async function GET(_request: NextRequest, { params }: Params) {
   }
 
   const payments = await listPayments();
-  const workers = await listWorkers();
-  const workerName = (id?: string) => (id && id !== 'admin' ? workers.find((w) => w.id === id)?.name || '' : '');
+  const people = await personDirectory();
+  const nameOf = (id?: string) => (id ? people.get(id)?.name || '' : '');
   const cases = (await listClientCases(clientId))
     .filter((c) => caseVisibleTo(c, auth.viewer))
     .map((c) => ({
       ...c,
       missingItems: countMissingItems(c),
       finance: getCaseFinance(c, payments),
-      assignedToName: workerName(c.assignedTo),
-      openedByName: workerName(c.openedBy),
+      assignedToName: nameOf(c.assignedTo),
+      openedByName: c.openedBy === 'admin' ? '' : nameOf(c.openedBy),
+      handlerId: caseHandlerId(c),
     }));
 
   const isAdmin = auth.viewer.role === 'admin';

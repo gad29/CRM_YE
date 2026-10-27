@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import bcrypt from 'bcryptjs';
 import { MIN_PASSWORD_LENGTH, PASSWORD_HASH_ROUNDS } from '@/lib/admin-auth';
+import { caseHandlerId } from '@/lib/domain';
 import { createWorker, listCases, listWorkers } from '@/lib/store';
 import { requireAdmin } from '@/lib/viewer';
 
@@ -13,7 +14,7 @@ export async function GET() {
   const workers = (await listWorkers()).map(({ passwordHash: _hash, ...worker }) => ({
     ...worker,
     openCases: cases.filter(
-      (c) => c.stage !== 'closed' && (c.openedBy === worker.id || c.assignedTo === worker.id),
+      (c) => c.stage !== 'closed' && caseHandlerId(c) === worker.id,
     ).length,
   }));
   return NextResponse.json({ ok: true, data: workers });

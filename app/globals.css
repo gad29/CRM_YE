@@ -509,7 +509,7 @@ code {
 
 .pipeline-cards {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
   gap: 14px;
 }
 
@@ -1620,6 +1620,7 @@ code {
 .pipeline-cards > *:nth-child(2) { animation-delay: 60ms; }
 .pipeline-cards > *:nth-child(3) { animation-delay: 120ms; }
 .pipeline-cards > *:nth-child(4) { animation-delay: 180ms; }
+.pipeline-cards > *:nth-child(5) { animation-delay: 240ms; }
 
 /* ─────────────────────────────────────────────────────────────
    Responsive
@@ -1706,3 +1707,61 @@ code {
   .split { flex-wrap: wrap; }
   .team-chips { gap: 6px; }
 }
+
+/* ─────────────────────────────────────────────────────────────
+   Operating-company colours (מילגם / אלונים / מעוף)
+   Elements get the company colour as --co (inline style).
+   ───────────────────────────────────────────────────────────── */
+
+.company-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 9px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 1.7;
+  color: var(--co, var(--muted));
+  background: color-mix(in srgb, var(--co, var(--muted)) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--co, var(--muted)) 30%, transparent);
+  white-space: nowrap;
+}
+
+.company-chip::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--co, var(--muted));
+}
+
+[data-theme='dark'] .company-chip { color: color-mix(in srgb, var(--co, var(--muted)) 65%, white); }
+
+/* Coloured stripe on the starting (right, in RTL) edge of a case card. */
+.case-list-item.has-company,
+.kanban-card.has-company {
+  border-inline-start: 4px solid var(--co);
+}
+
+.color-swatch-input {
+  width: 34px;
+  height: 34px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* Awaiting-payment KPI card (dashboard) — links to the filtered case list. */
+.pipeline-card.pc-payment .kpi-icon { background: rgba(161, 98, 7, 0.12); color: #a16207; }
+.pipeline-card.pc-payment .pc-count { color: #a16207; }
+[data-theme='dark'] .pipeline-card.pc-payment .pc-count,
+[data-theme='dark'] .pipeline-card.pc-payment .kpi-icon { color: #facc15; }
+a.pipeline-card { color: inherit; text-decoration: none; display: block; }
+a.pipeline-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Case handler / transfer controls on the case page. */
+.transfer-btn { white-space: nowrap; }

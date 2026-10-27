@@ -12,6 +12,7 @@ import {
   type PaymentMethod,
 } from '@/lib/domain';
 import { useConfig } from '@/components/config-provider';
+import { CompanyChip, useCompanyStripe } from '@/components/company-chip';
 
 type ClientDetail = {
   client: {
@@ -34,6 +35,7 @@ type ClientDetail = {
     officeOther?: string;
     missingItems: number;
     troubleFlag?: boolean;
+    company?: string;
     assignedToName?: string;
     openedByName?: string;
     finance: { fee: number; paid: number; balance: number; status: 'paid' | 'partial' | 'unpaid' };
@@ -65,6 +67,7 @@ type TabId = (typeof TABS)[number]['id'];
 export default function ClientPage({ params }: { params: Promise<{ clientId: string }> }) {
   const router = useRouter();
   const config = useConfig();
+  const stripe = useCompanyStripe();
   const { clientId } = use(params);
   const [data, setData] = useState<ClientDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -211,10 +214,11 @@ export default function ClientPage({ params }: { params: Promise<{ clientId: str
             <div className="card muted" style={{ padding: 24 }}>אין תיקים ללקוח זה. פתח תיק חדש כדי להתחיל.</div>
           )}
           {cases.map((c) => (
-            <Link key={c.id} className={`case-list-item ${c.troubleFlag ? 'case-trouble' : ''}`} href={`/cases/${c.id}` as never}>
+            <Link key={c.id} {...stripe(c.company, `case-list-item ${c.troubleFlag ? 'case-trouble' : ''}`)} href={`/cases/${c.id}` as never}>
               <span className="cli-name">{c.troubleFlag && '🚩 '}{c.title}</span>
               <span className="cli-stage">{stageLabelOf(config, c.stage)}</span>
               <span className="cli-meta">
+                <CompanyChip company={c.company} />
                 <span>{c.officeName}</span>
                 {(c.assignedToName || c.openedByName) && <span>· 👤 {c.assignedToName || c.openedByName}</span>}
                 {c.missingItems > 0 && <span className="cli-missing">· {c.missingItems} מסמכים חסרים</span>}

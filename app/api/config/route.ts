@@ -38,7 +38,11 @@ export async function PATCH(request: NextRequest) {
   if (Array.isArray(body.companies)) {
     patch.companies = body.companies
       .filter((c) => c && typeof c.value === 'string' && typeof c.label === 'string' && c.value.trim() && c.label.trim())
-      .map((c) => ({ value: c.value.trim(), label: c.label.trim() }));
+      .map((c) => {
+        // Only a plain #rrggbb colour is stored — it ends up in inline styles.
+        const color = typeof c.color === 'string' && /^#[0-9a-f]{6}$/i.test(c.color) ? c.color.toLowerCase() : undefined;
+        return color ? { value: c.value.trim(), label: c.label.trim(), color } : { value: c.value.trim(), label: c.label.trim() };
+      });
   }
   if (Array.isArray(body.paymentMethods)) {
     patch.paymentMethods = body.paymentMethods

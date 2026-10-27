@@ -2,7 +2,9 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import {
   CASE_STAGES,
+  caseHandlerId,
   countMissingItems,
+  isManagerId,
   officeDisplayName,
   type CaseKind,
   type CaseStage,
@@ -21,7 +23,7 @@ import {
   listActivity,
   listCaseDocuments,
   listCasePayments,
-  listWorkers,
+  personDirectory,
   updateCase,
 } from '@/lib/store';
 import { getViewer } from '@/lib/viewer';
@@ -39,10 +41,12 @@ export async function GET(_request: NextRequest, { params }: Params) {
   }
 
   const isAdmin = auth.viewer.role === 'admin';
-  const workers = (await listWorkers()).map(({ passwordHash: _hash, ...worker }) => worker);
+  const people = await personDirectory();
   const client = await getClient(caseRecord.clientId);
   const casePayments = await listCasePayments(caseId);
-  const workerName = (id?: string) => (id && id !== 'admin' ? workers.find((w) => w.id === id)?.name || '' : '');
+  const nameOf = (id?: string) => (id ? people.get(id)?.name || '' : '');
+  const handlerId = caseHandlerId(caseRecord);
+  const active = [...people.values()].filter((p) => p.active).map(({ id, name }) => ({ id, name }));
   return NextResponse.json({
     ok: true,
     data: {
@@ -51,16 +55,21 @@ export async function GET(_request: NextRequest, { params }: Params) {
         officeName: officeDisplayName(caseRecord),
         missingItems: countMissingItems(caseRecord),
         finance: getCaseFinance(caseRecord, casePayments),
-        assignedToName: workerName(caseRecord.assignedTo),
-        openedByName: workerName(caseRecord.openedBy),
+        assignedToName: nameOf(caseRecord.assignedTo),
+        openedByName: caseRecord.openedBy === 'admin' ? '' : nameOf(caseRecord.openedBy),
+        handlerId,
+        handlerName: nameOf(handlerId),
       },
       client,
       documents: await listCaseDocuments(caseId),
       payments: isAdmin ? casePayments : [],
       activity: await listActivity({ caseId, limit: 30 }),
-      workers: isAdmin ? workers.filter((w) => w.active) : [],
+      // Who a case can be transferred to: managers for everyone, workers for admins.
+      managers: active.filter((p) => isManagerId(p.id)),
+      workers: isAdmin ? active.filter((p) => !isManagerId(p.id)) : [],
       canManagePayments: isAdmin,
       canAssign: isAdmin,
+      canTransferToManager: !isAdmin,
       hasBlankContract: Boolean((await getSettings()).blankContract),
     },
   });
@@ -106,14 +115,25 @@ export async function PATCH(request: NextRequest, { params }: Params) {
     return NextResponse.json({ ok: false, error: `Unknown stage: ${body.stage}` }, { status: 400 });
   }
 
-  // Only the admin can assign cases to workers.
-  if (body.assignedTo !== undefined && auth.viewer.role !== 'admin') {
-    return NextResponse.json({ ok: false, error: 'רק מנהל יכול לשייך תיקים לעובדים' }, { status: 403 });
+  // Transfers: an admin can hand a case to any active manager or worker; a
+  // worker can hand a case they handle back to a manager (not to other workers).
+  if (body.assignedTo !== undefined) {
+    const target = String(body.assignedTo).trim();
+    const person = target ? (await personDirectory()).get(target) : undefined;
+    if (auth.viewer.role !== 'admin') {
+      if (!person || !person.active || !isManagerId(target)) {
+        return NextResponse.json({ ok: false, error: 'עובד יכול להעביר תיק רק למנהל' }, { status: 403 });
+      }
+    } else if (target && (!person || !person.active)) {
+      return NextResponse.json({ ok: false, error: 'יעד ההעברה לא נמצא או שאינו פעיל' }, { status: 400 });
+    }
+    body.assignedTo = target;
   }
 
   const updated = await updateCase(caseId, body);
   if (!updated) return NextResponse.json({ ok: false, error: 'Case not found' }, { status: 404 });
-  return NextResponse.json({ ok: true, data: updated });
+  // After a transfer a worker may no longer have access — the page uses this to leave.
+  return NextResponse.json({ ok: true, data: updated, stillVisible: caseVisibleTo(updated, auth.viewer) });
 }
 
 export async function DELETE(_request: NextRequest, { params }: Params) {

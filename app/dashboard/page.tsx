@@ -108,6 +108,9 @@ export default async function DashboardPage() {
         .slice(0, 5)
     : [];
 
+  const awaitingPayment = cases.filter((c) => c.stage === 'awaiting-payment');
+  const awaitingPaymentBalance = awaitingPayment.reduce((sum, c) => sum + getCaseFinance(c, payments).balance, 0);
+
   const stageOrder = Object.keys(config.stageLabels) as CaseStage[];
 
   const priorityOrder: Record<TaskPriority, number> = { urgent: 0, high: 1, normal: 2 };
@@ -144,6 +147,13 @@ export default async function DashboardPage() {
           <div className="pc-count"><AnimatedNumber value={summary.openCases} /></div>
           <div className="muted" style={{ fontSize: 12 }}>מתוך {summary.cases} תיקים · {summary.clients} לקוחות</div>
         </div>
+        <Link className="pipeline-card pc-payment" href={'/cases?filter=payment' as never} title="לרשימת התיקים הממתינים לתשלום">
+          <div className="pc-label"><span className="kpi-icon"><CoinsIcon /></span> ממתינים לתשלום</div>
+          <div className="pc-count"><AnimatedNumber value={awaitingPayment.length} /></div>
+          <div className="muted" style={{ fontSize: 12 }}>
+            {isAdmin && awaitingPaymentBalance > 0 ? `יתרה ${shekel(awaitingPaymentBalance)} · ` : ''}לחצו לרשימה ←
+          </div>
+        </Link>
         <div className="pipeline-card pc-new">
           <div className="pc-label"><span className="kpi-icon"><FileWarnIcon /></span> ממתינים למסמכים</div>
           <div className="pc-count"><AnimatedNumber value={summary.missingDocsCases} /></div>

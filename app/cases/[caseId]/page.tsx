@@ -24,6 +24,7 @@ import {
   type PaymentMethod,
 } from '@/lib/domain';
 import { useConfig } from '@/components/config-provider';
+import { CompanyChip } from '@/components/company-chip';
 
 type CaseDetail = {
   case: {
@@ -49,6 +50,9 @@ type CaseDetail = {
     assignedTo?: string;
     openedByName?: string;
     assignedToName?: string;
+    /** Who handles the case now: a worker id, 'admin' or ADM-x. */
+    handlerId: string;
+    handlerName?: string;
     paymentStatusOverride?: 'paid' | 'partial' | 'unpaid';
     openedAt: string;
     submittedAt?: string;
@@ -60,9 +64,11 @@ type CaseDetail = {
   documents: DocumentItem[];
   payments: Array<{ id: string; amount: number; method: PaymentMethod; paidAt: string; note?: string }>;
   activity: Array<{ id: string; summary: string; at: string }>;
-  workers: Array<{ id: string; name: string; email: string; active: boolean }>;
+  workers: Array<{ id: string; name: string }>;
+  managers: Array<{ id: string; name: string }>;
   canManagePayments?: boolean;
   canAssign?: boolean;
+  canTransferToManager?: boolean;
   hasBlankContract?: boolean;
 };
 
@@ -223,12 +229,26 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
     reload();
   }
 
-  async function assignWorker(workerId: string) {
-    await fetch(`/api/cases/${caseId}`, {
+  /** Hand the case to another person (admin: anyone; worker: a manager). */
+  async function transferTo(targetId: string, targetName: string) {
+    if (!targetId || targetId === caseRecord.handlerId) return;
+    if (!window.confirm(`להעביר את התיק ל${targetName}?`)) return;
+    const res = await fetch(`/api/cases/${caseId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ assignedTo: workerId }),
+      body: JSON.stringify({ assignedTo: targetId }),
     });
+    const result = await res.json().catch(() => ({}));
+    if (!res.ok || !result.ok) {
+      window.alert(result.error || 'ההעברה נכשלה');
+      return;
+    }
+    // A worker who hands the case on no longer sees it.
+    if (result.stillVisible === false) {
+      window.alert(`התיק הועבר ל${targetName}`);
+      router.push('/cases' as never);
+      return;
+    }
     reload();
   }
 
@@ -430,9 +450,12 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
                 {' · '}
               </>
             )}
-            {caseRecord.company && caseRecord.company !== 'none'
-              ? `${optionLabel(config.companies, caseRecord.company, caseRecord.officeName)} · ${caseRecord.officeName}`
-              : caseRecord.officeName}
+            {caseRecord.company && caseRecord.company !== 'none' && (
+              <>
+                <CompanyChip company={caseRecord.company} />{' '}
+              </>
+            )}
+            {caseRecord.officeName}
             {caseRecord.referenceNumber && <> · מס׳ תיק במשרד: <span dir="ltr">{caseRecord.referenceNumber}</span></>}
           </p>
         </div>
@@ -445,19 +468,60 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
           {data.canAssign ? (
             <select
               className="assign-select"
-              value={caseRecord.assignedTo || ''}
-              onChange={(e) => assignWorker(e.target.value)}
-              title="שיוך התיק לעובד"
+              value={caseRecord.handlerId}
+              onChange={(e) => {
+                const target = [...data.managers, ...data.workers].find((p) => p.id === e.target.value);
+                if (target) void transferTo(target.id, target.name);
+              }}
+              title="מי מטפל בתיק — בחירה מעבירה את התיק"
             >
-              <option value="">ללא עובד משויך</option>
-              {data.workers.map((w) => (
-                <option key={w.id} value={w.id}>👤 {w.name}</option>
-              ))}
+              <optgroup label="מנהלים">
+                {data.managers.map((m) => (
+                  <option key={m.id} value={m.id}>🧑‍💼 {m.name}</option>
+                ))}
+              </optgroup>
+              {data.workers.length > 0 && (
+                <optgroup label="עובדים">
+                  {data.workers.map((w) => (
+                    <option key={w.id} value={w.id}>👤 {w.name}</option>
+                  ))}
+                </optgroup>
+              )}
+              {/* A handler who has since been deactivated still shows as current. */}
+              {![...data.managers, ...data.workers].some((p) => p.id === caseRecord.handlerId) && (
+                <option value={caseRecord.handlerId}>👤 {caseRecord.handlerName || caseRecord.handlerId}</option>
+              )}
             </select>
           ) : (
-            (caseRecord.assignedToName || caseRecord.openedByName) && (
-              <span className="badge">👤 {caseRecord.assignedToName || caseRecord.openedByName}</span>
-            )
+            <>
+              <span className="badge">👤 {caseRecord.handlerName || 'אני'}</span>
+              {data.canTransferToManager &&
+                data.managers.length > 0 &&
+                (data.managers.length === 1 ? (
+                  <button
+                    type="button"
+                    className="button button-secondary button-compact transfer-btn"
+                    onClick={() => transferTo(data.managers[0].id, data.managers[0].name)}
+                  >
+                    ↩ העבר למנהל
+                  </button>
+                ) : (
+                  <select
+                    className="assign-select"
+                    value=""
+                    onChange={(e) => {
+                      const target = data.managers.find((m) => m.id === e.target.value);
+                      if (target) void transferTo(target.id, target.name);
+                    }}
+                    title="העברת התיק למנהל"
+                  >
+                    <option value="">↩ העבר למנהל…</option>
+                    {data.managers.map((m) => (
+                      <option key={m.id} value={m.id}>{m.name}</option>
+                    ))}
+                  </select>
+                ))}
+            </>
           )}
           {caseRecord.missingItems > 0 && <span className="badge danger">{caseRecord.missingItems} מסמכים חסרים</span>}
           {caseRecord.decisionStatus && (
@@ -754,7 +818,7 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
               <div className="review-grid">
                 <div className="review-row">
                   <span className="muted">עובד מטפל</span>
-                  <strong>{caseRecord.assignedToName || caseRecord.openedByName || 'מנהל'}</strong>
+                  <strong>{caseRecord.handlerName || 'מנהל'}</strong>
                 </div>
                 <div className="review-row"><span className="muted">חברה מטפלת</span><strong>{optionLabel(config.companies, caseRecord.company || 'none', '—')}</strong></div>
                 <div className="review-row"><span className="muted">סוג התיק</span><strong>{CASE_KIND_LABELS[caseRecord.caseKind || 'new']}</strong></div>

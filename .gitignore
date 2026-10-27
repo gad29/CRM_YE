@@ -13,3 +13,6 @@ public/pdf.worker.min.mjs
 # Never commit it; back it up instead (scripts/backup.sh).
 data/
 backups/
+
+# Local editor/assistant settings
+.claude/

@@ -6,7 +6,6 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import {
   CASE_KIND_LABELS,
   CASE_STAGES,
-  optionLabel,
   PAYMENT_STATUS_LABELS,
   stageLabelOf,
   isUnderInvestigation,
@@ -18,6 +17,7 @@ import {
   type OperatingCompany,
 } from '@/lib/domain';
 import { useConfig } from '@/components/config-provider';
+import { CompanyChip, useCompanyStripe } from '@/components/company-chip';
 
 type CaseRow = {
   id: string;
@@ -48,6 +48,7 @@ function shekel(amount: number) {
 
 const FILTERS = [
   { id: 'open', label: 'פעילים' },
+  { id: 'payment', label: '💰 ממתינים לתשלום' },
   { id: 'trouble', label: '🚩 דורשים טיפול' },
   { id: 'stuck', label: 'חסרים מסמכים' },
   { id: 'waiting', label: 'ממתינים למשרד' },
@@ -256,6 +257,7 @@ const BOARD_STAGES: CaseStage[] = CASE_STAGES.filter((s) => s !== 'closed');
 function KanbanBoard({ cases, onMove }: { cases: CaseRow[]; onMove: (caseId: string, stage: CaseStage) => void }) {
   const router = useRouter();
   const config = useConfig();
+  const stripe = useCompanyStripe();
   const [dragOver, setDragOver] = useState<CaseStage | null>(null);
 
   return (
@@ -286,7 +288,7 @@ function KanbanBoard({ cases, onMove }: { cases: CaseRow[]; onMove: (caseId: str
               {columnCases.map((c) => (
                 <div
                   key={c.id}
-                  className={`kanban-card ${c.troubleFlag || isUnderInvestigation(c) ? 'trouble' : ''}`}
+                  {...stripe(c.company, `kanban-card ${c.troubleFlag || isUnderInvestigation(c) ? 'trouble' : ''}`)}
                   draggable
                   onDragStart={(e) => e.dataTransfer.setData('text/case-id', c.id)}
                   onClick={() => router.push(`/cases/${c.id}` as never)}
@@ -299,7 +301,7 @@ function KanbanBoard({ cases, onMove }: { cases: CaseRow[]; onMove: (caseId: str
                   </div>
                   <div className="kanban-card-sub">
                     <span>{c.title}</span>
-                    {c.company && c.company !== 'none' && <span>· {optionLabel(config.companies, c.company, '')}</span>}
+                    <CompanyChip company={c.company} />
                     {c.missingItems > 0 && <span className="cli-missing">· {c.missingItems} חסרים</span>}
                   </div>
                   {(c.assignedToName || c.openedByName) && (
@@ -341,7 +343,11 @@ function CasesPageInner() {
   const [cases, setCases] = useState<CaseRow[]>([]);
   const [clients, setClients] = useState<ClientOption[]>([]);
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState<FilterId>('open');
+  const stripe = useCompanyStripe();
+  const [filter, setFilter] = useState<FilterId>(() => {
+    const wanted = searchParams.get('filter');
+    return (FILTERS.find((f) => f.id === wanted)?.id ?? 'open') as FilterId;
+  });
   const [view, setView] = useState<'list' | 'board'>('list');
   const [showNew, setShowNew] = useState(searchParams.get('new') === '1');
 
@@ -377,6 +383,8 @@ function CasesPageInner() {
     switch (filter) {
       case 'open':
         return cases.filter((c) => c.stage !== 'closed');
+      case 'payment':
+        return cases.filter((c) => c.stage === 'awaiting-payment');
       case 'trouble':
         return cases.filter((c) => c.troubleFlag && c.stage !== 'closed');
       case 'stuck':
@@ -438,8 +446,17 @@ function CasesPageInner() {
         <div className="card muted" style={{ padding: 24 }}>אין תיקים בסינון הנוכחי.</div>
       ) : (
         <div className="office-case-list">
+          {filter === 'payment' && (
+            <div className="muted" style={{ fontSize: 13 }}>
+              {filtered.length} תיקים ממתינים לתשלום · יתרה לגבייה {shekel(filtered.reduce((sum, c) => sum + c.finance.balance, 0))}
+            </div>
+          )}
           {filtered.map((c) => (
-            <Link key={c.id} className={`case-list-item ${c.troubleFlag || isUnderInvestigation(c) ? 'case-trouble' : ''}`} href={`/cases/${c.id}` as never}>
+            <Link
+              key={c.id}
+              {...stripe(c.company, `case-list-item ${c.troubleFlag || isUnderInvestigation(c) ? 'case-trouble' : ''}`)}
+              href={`/cases/${c.id}` as never}
+            >
               <span className="cli-name">
                 {c.troubleFlag && '🚩 '}
                 {isUnderInvestigation(c) && '🔍 '}
@@ -449,7 +466,7 @@ function CasesPageInner() {
               <span className="cli-stage">{stageLabelOf(config, c.stage)}</span>
               <span className="cli-meta">
                 <span className="case-id-badge">{c.id}</span>
-                {c.company && c.company !== 'none' && <span>{optionLabel(config.companies, c.company, '')}</span>}
+                <CompanyChip company={c.company} />
                 {(!c.company || c.company === 'none') && <span>{c.officeName}</span>}
                 {c.assignedToName && <span>· 👤 {c.assignedToName}</span>}
                 {!c.assignedToName && c.openedByName && <span>· 👤 {c.openedByName}</span>}

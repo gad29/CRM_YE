@@ -16,6 +16,7 @@ type CaseRow = {
   investigationOutcome?: 'approved' | 'rejected';
   openedBy?: string;
   assignedTo?: string;
+  handlerId?: string;
   nextAction?: string;
   finance: { fee: number; paid: number; balance: number; status: 'paid' | 'partial' | 'unpaid' };
 };
@@ -46,7 +47,7 @@ export function TeamOverview() {
 
   const workerCases = useMemo(() => {
     if (!selected) return [];
-    return cases.filter((c) => c.assignedTo === selected || c.openedBy === selected);
+    return cases.filter((c) => c.handlerId === selected);
   }, [cases, selected]);
 
   if (!loaded || workers.length === 0) return null;
