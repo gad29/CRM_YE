@@ -82,6 +82,9 @@ export function DocumentsPanel({ clientId, documents, caseId, checklistOptions, 
   const canEmail = Boolean(clientContact?.email);
   const canPhone = Boolean(clientContact?.phone);
   const canSend = canEmail || canPhone;
+  const zipBase = `/api/clients/${clientId}/documents/zip`;
+  const zipAllHref = caseId ? `${zipBase}?caseId=${encodeURIComponent(caseId)}` : zipBase;
+  const zipSelectedHref = `${zipBase}?ids=${selected.map(encodeURIComponent).join(',')}`;
 
   function toggleSelected(id: string) {
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
@@ -324,8 +327,8 @@ export function DocumentsPanel({ clientId, documents, caseId, checklistOptions, 
         <p className="muted" style={{ marginTop: 16 }}>אין עדיין מסמכים בתיקייה.</p>
       ) : (
         <div style={{ marginTop: 16 }}>
-          {canSend && documents.length > 1 && (
-            <div className="split" style={{ marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
+          <div className="split" style={{ marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
+            {documents.length > 1 && (
               <label className="muted" style={{ fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                 <input
                   type="checkbox"
@@ -334,7 +337,16 @@ export function DocumentsPanel({ clientId, documents, caseId, checklistOptions, 
                 />
                 בחר הכל
               </label>
-              {selected.length > 0 && (
+            )}
+            <a className="doc-action-btn" href={zipAllHref} download title="כל המסמכים בקובץ ZIP אחד">
+              הורד הכל (ZIP)
+            </a>
+            {selected.length > 0 && (
+              <a className="doc-action-btn" href={zipSelectedHref} download>
+                הורד {selected.length} נבחרים (ZIP)
+              </a>
+            )}
+              {canSend && selected.length > 0 && (
                 <button
                   type="button"
                   className={`doc-action-btn approve ${bundleOpen ? 'active-send' : ''}`}
@@ -344,8 +356,7 @@ export function DocumentsPanel({ clientId, documents, caseId, checklistOptions, 
                 </button>
               )}
               {bundleSent && <span className="text-feedback-success" style={{ fontWeight: 600, fontSize: 13 }}>✓ נשלח קישור ללקוח</span>}
-            </div>
-          )}
+          </div>
           {bundleOpen && selected.length > 0 && (
             <div className="send-picker" style={{ marginBottom: 12 }}>
               <span className="muted" style={{ fontSize: 12 }}>שליחת קישור אחד ל-{selected.length} מסמכים דרך:</span>
@@ -363,12 +374,12 @@ export function DocumentsPanel({ clientId, documents, caseId, checklistOptions, 
           {documents.map((doc) => (
             <div key={doc.id}>
               <div className="doc-row">
-                {canSend && documents.length > 1 && (
+                {documents.length > 1 && (
                   <input
                     type="checkbox"
                     checked={selected.includes(doc.id)}
                     onChange={() => toggleSelected(doc.id)}
-                    title="בחר לשליחה בקישור אחד"
+                    title="בחירה להורדה או לשליחה"
                   />
                 )}
                 <span style={{ fontSize: 20 }}>{fileEmoji(doc.mimeType, doc.originalName)}</span>

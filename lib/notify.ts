@@ -1,7 +1,9 @@
-// Direct delivery: email through Resend, WhatsApp through Meta's Cloud API.
+// Direct delivery: email through the business's Gmail (or Resend), WhatsApp
+// through Meta's Cloud API.
 // Every attempt is written to notification_log so the Connections page can
 // show what went out, and Meta's delivery-status webhook can update it.
-import { env, hasResendConfig, hasWhatsAppConfig } from '@/lib/env';
+import { emailProvider, env, hasWhatsAppConfig } from '@/lib/env';
+import { sendViaGmail } from '@/lib/gmail';
 import { sql } from '@/lib/db';
 import type { OutgoingMessage } from '@/lib/messages';
 
@@ -11,7 +13,7 @@ export type DeliveryResult = { ok: true; providerMessageId?: string } | { ok: fa
 
 /** True when the provider for this channel is configured. */
 export function directChannelAvailable(channel: DeliveryChannel) {
-  if (channel === 'email') return hasResendConfig();
+  if (channel === 'email') return emailProvider() !== null;
   return hasWhatsAppConfig();
 }
 
@@ -39,7 +41,7 @@ function maskRecipient(value: string) {
 
 async function logDelivery(entry: {
   channel: DeliveryChannel;
-  provider: 'resend' | 'meta';
+  provider: 'gmail' | 'resend' | 'meta';
   kind: string;
   recipient: string;
   status: 'sent' | 'failed';
@@ -164,11 +166,12 @@ export async function deliver(input: {
   if (channel === 'email') {
     const to = input.to.email?.trim();
     if (!to) return { ok: false, error: 'אין כתובת אימייל' };
-    if (!hasResendConfig()) return { ok: false, error: 'שליחת אימייל (Resend) לא הוגדרה' };
-    const result = await sendViaResend(to, message, input.idempotencyKey);
+    const provider = emailProvider();
+    if (!provider) return { ok: false, error: 'שליחת אימייל לא הוגדרה (Gmail או Resend)' };
+    const result = provider === 'gmail' ? await sendViaGmail(to, message) : await sendViaResend(to, message, input.idempotencyKey);
     await logDelivery({
       channel,
-      provider: 'resend',
+      provider,
       kind: message.kind,
       recipient: to,
       status: result.ok ? 'sent' : 'failed',

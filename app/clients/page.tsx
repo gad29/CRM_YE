@@ -30,7 +30,8 @@ function NewClientForm({ onCreated, onClose }: { onCreated: (caseId: string | nu
   const [form, setForm] = useState({ fullName: '', phone: '', idNumber: '', email: '', city: '', address: '', notes: '' });
   const [caseForm, setCaseForm] = useState({
     title: config.defaultCaseTitle,
-    company: (config.companies[0]?.value ?? 'none') as OperatingCompany,
+    // No default — the company must be chosen explicitly.
+    company: '' as OperatingCompany | '',
     caseKind: 'new' as CaseKind,
     fee: config.defaultFee ? String(config.defaultFee) : '',
   });
@@ -136,8 +137,13 @@ function NewClientForm({ onCreated, onClose }: { onCreated: (caseId: string | nu
             <input value={caseForm.title} onChange={(e) => setCaseForm({ ...caseForm, title: e.target.value })} />
           </div>
           <div className="field">
-            <label>חברה מטפלת</label>
-            <select value={caseForm.company} onChange={(e) => setCaseForm({ ...caseForm, company: e.target.value as OperatingCompany })}>
+            <label>חברה מטפלת *</label>
+            <select
+              value={caseForm.company}
+              onChange={(e) => setCaseForm({ ...caseForm, company: e.target.value as OperatingCompany | '' })}
+              required
+            >
+              <option value="" disabled>בחרו חברה…</option>
               {config.companies.map((c) => (
                 <option key={c.value} value={c.value}>{c.label}</option>
               ))}

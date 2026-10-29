@@ -21,7 +21,9 @@
   "dependencies": {
     "animejs": "^4.3.6",
     "bcryptjs": "^3.0.3",
+    "fflate": "^0.8.3",
     "next": "^15.5.12",
+    "nodemailer": "^7.0.13",
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^4.10.38",
     "pg": "^8.23.1",
@@ -31,6 +33,7 @@
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
     "@types/node": "22.15.3",
+    "@types/nodemailer": "^8.0.2",
     "@types/pg": "^8.23.1",
     "@types/react": "19.0.12",
     "@types/react-dom": "19.0.5",

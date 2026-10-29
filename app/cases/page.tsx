@@ -78,7 +78,8 @@ function NewCaseForm({
     description: '',
     fee: config.defaultFee ? String(config.defaultFee) : '',
     nextAction: '',
-    company: (config.companies[0]?.value ?? 'none') as OperatingCompany,
+    // No default — the company must be chosen explicitly.
+    company: '' as OperatingCompany | '',
     caseKind: 'new' as CaseKind,
   });
   const [useChecklist, setUseChecklist] = useState(config.seedChecklistByDefault);
@@ -151,7 +152,12 @@ function NewCaseForm({
           </div>
           <div className="field">
             <label>חברה מטפלת *</label>
-            <select value={form.company} onChange={(e) => setForm({ ...form, company: e.target.value as OperatingCompany })}>
+            <select
+              value={form.company}
+              onChange={(e) => setForm({ ...form, company: e.target.value as OperatingCompany | '' })}
+              required
+            >
+              <option value="" disabled>בחרו חברה…</option>
               {config.companies.map((c) => (
                 <option key={c.value} value={c.value}>{c.label}</option>
               ))}

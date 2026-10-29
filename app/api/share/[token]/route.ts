@@ -4,6 +4,7 @@ import { getConfig, getDocument, getDocuments, readDocumentFile } from '@/lib/st
 import { parseShareToken } from '@/lib/share';
 import { fileResponse } from '@/lib/file-response';
 import type { DocumentRecord } from '@/lib/domain';
+import { zipDocuments, zipHeaders } from '@/lib/zip-documents';
 
 function streamDocument(record: DocumentRecord, download = false) {
   const file = readDocumentFile(record);
@@ -70,6 +71,8 @@ function bundlePage(token: string, docs: DocumentRecord[], businessName: string)
   a { color: #2563eb; text-decoration: none; font-weight: 600; font-size: 13px; }
   a:hover { text-decoration: underline; }
   .foot { color: #94a3b8; font-size: 12px; margin-top: 16px; text-align: center; }
+  .zip { display: block; margin-top: 14px; padding: 12px; border-radius: 12px; text-align: center; background: #2563eb; color: #fff !important; font-size: 14px; }
+  .zip:hover { text-decoration: none; background: #1d4ed8; }
 </style>
 </head>
 <body>
@@ -77,6 +80,7 @@ function bundlePage(token: string, docs: DocumentRecord[], businessName: string)
     <h1>מסמכים עבורך</h1>
     <p class="sub">${docs.length} מסמכים · נשלח מ${escapeHtml(businessName)}</p>
     <ul>${rows}</ul>
+    <a class="zip" href="/api/share/${encodeURIComponent(token)}?zip=1">הורדת כל המסמכים (ZIP)</a>
     <p class="foot">קישור מאובטח ואישי — נא לא להעביר לאחרים.</p>
   </div>
 </body>
@@ -124,6 +128,13 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     .map((id) => found.find((d) => d.id === id))
     .filter((d): d is DocumentRecord => Boolean(d));
   if (!docs.length) return NextResponse.json({ ok: false, error: 'המסמכים לא נמצאו' }, { status: 404 });
+
+  if (request.nextUrl.searchParams.get('zip') === '1') {
+    const { buffer } = zipDocuments(docs);
+    const response = new NextResponse(new Uint8Array(buffer), { headers: zipHeaders('מסמכים', buffer.length) });
+    response.headers.set('Referrer-Policy', 'no-referrer');
+    return response;
+  }
 
   // A single document opens directly; multiple render the bundle page.
   if (docs.length === 1) return streamDocument(docs[0]);

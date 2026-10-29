@@ -65,6 +65,13 @@ export async function POST(request: NextRequest) {
   }
 
   const config = await getConfig();
+  // Open a case unless the admin turned auto-create off (the flag can override).
+  const shouldCreateCase = body.createCase ?? config.autoCreateCaseOnClient;
+  // Checked before the client is saved, so a refused request leaves nothing half-made.
+  if (shouldCreateCase && !config.companies.some((c) => c.value === body.case?.company)) {
+    return NextResponse.json({ ok: false, error: 'יש לבחור חברה מטפלת לתיק' }, { status: 400 });
+  }
+
   const creator = actorId(auth.session);
   const record = await createClient({
     fullName: body.fullName,
@@ -77,8 +84,6 @@ export async function POST(request: NextRequest) {
     createdBy: creator,
   });
 
-  // Open a case unless the admin turned auto-create off (the flag can override).
-  const shouldCreateCase = body.createCase ?? config.autoCreateCaseOnClient;
   let caseRecord = undefined;
   if (shouldCreateCase) {
     const seed = body.case?.seedChecklist ?? config.seedChecklistByDefault;

@@ -22,6 +22,17 @@ export const env = {
     return 25 * 1024 * 1024;
   })(),
 
+  // ── Email via the business's own Gmail (preferred when set) ───────────────
+  /** The Gmail address mail is sent from — recipients see this address. */
+  gmailUser: (process.env.GMAIL_USER || '').trim(),
+  /** 16-character Google "App Password" (needs 2-Step Verification on). */
+  gmailAppPassword: (process.env.GMAIL_APP_PASSWORD || '').replace(/\s+/g, ''),
+  /** Display name next to the address, e.g. "יוסי כהן — ייעוץ זכויות". */
+  emailFromName: process.env.EMAIL_FROM_NAME || '',
+  /** Testing only — point at a local SMTP server instead of smtp.gmail.com. */
+  smtpHost: process.env.SMTP_HOST || 'smtp.gmail.com',
+  smtpPort: Number(process.env.SMTP_PORT || 465),
+
   // ── Email via Resend ───────────────────────────────────────────────────────
   resendApiKey: process.env.RESEND_API_KEY || '',
   /** Testing only — point at a local fake instead of the real API. */
@@ -62,6 +73,17 @@ export function hasAdminPassword() {
     (env.adminPasswordHash && !looksLikePlaceholder(env.adminPasswordHash)) ||
     (env.adminPassword && !looksLikePlaceholder(env.adminPassword)),
   );
+}
+
+export function hasGmailConfig() {
+  return Boolean(env.gmailUser.includes('@') && env.gmailAppPassword.length >= 16);
+}
+
+/** Which email provider sends mail: the business's Gmail first, else Resend. */
+export function emailProvider(): 'gmail' | 'resend' | null {
+  if (hasGmailConfig()) return 'gmail';
+  if (hasResendConfig()) return 'resend';
+  return null;
 }
 
 export function hasResendConfig() {

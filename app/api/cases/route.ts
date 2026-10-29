@@ -8,7 +8,7 @@ import {
   type GovernmentOffice,
   type OperatingCompany,
 } from '@/lib/domain';
-import { createCase, getCaseFinance, listClients, listPayments, listVisibleCases, personDirectory } from '@/lib/store';
+import { createCase, getCaseFinance, getConfig, listClients, listPayments, listVisibleCases, personDirectory } from '@/lib/store';
 import { actorId, getViewer } from '@/lib/viewer';
 
 export async function GET() {
@@ -64,6 +64,9 @@ export async function POST(request: NextRequest) {
 
   if (!body.clientId || !body.title?.trim()) {
     return NextResponse.json({ ok: false, error: 'לקוח וכותרת תיק הם שדות חובה' }, { status: 400 });
+  }
+  if (!(await getConfig()).companies.some((c) => c.value === body.company)) {
+    return NextResponse.json({ ok: false, error: 'יש לבחור חברה מטפלת לתיק' }, { status: 400 });
   }
 
   const record = await createCase({

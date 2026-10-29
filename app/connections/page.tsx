@@ -1,4 +1,4 @@
-import { env, hasAdminPassword, hasResendConfig, hasWhatsAppConfig } from '@/lib/env';
+import { emailProvider, env, hasAdminPassword, hasWhatsAppConfig } from '@/lib/env';
 import { IntegrationTools } from '@/components/integration-tools';
 
 export const dynamic = 'force-dynamic';
@@ -12,7 +12,8 @@ function Env({ name }: { name: string }) {
 }
 
 export default function ConnectionsPage() {
-  const email = hasResendConfig();
+  const provider = emailProvider();
+  const email = provider !== null;
   const whatsapp = hasWhatsAppConfig();
   const webhookUrl = `${env.appBaseUrl}/api/webhooks/whatsapp`;
 
@@ -23,7 +24,7 @@ export default function ConnectionsPage() {
           <p className="eyebrow">חיבורים</p>
           <h1 style={{ margin: '6px 0 4px' }}>אימייל, וואטסאפ ותזכורות</h1>
           <p className="muted" style={{ margin: 0 }}>
-            המערכת שולחת בעצמה: אימיילים דרך Resend והודעות וואטסאפ דרך Meta. המפתחות נשמרים בקובץ ההגדרות של השרת בלבד.
+            המערכת שולחת בעצמה: אימיילים מחשבון ה-Gmail של העסק והודעות וואטסאפ דרך Meta. המפתחות נשמרים בקובץ ההגדרות של השרת בלבד.
           </p>
         </div>
       </div>
@@ -31,14 +32,14 @@ export default function ConnectionsPage() {
       <div className="connection-grid" style={{ marginBottom: 20 }}>
         <div className="connection-card">
           <div className="split connection-topline">
-            <strong>אימייל (Resend)</strong>
+            <strong>אימייל ({provider === 'resend' ? 'Resend' : 'Gmail'})</strong>
             <StatusBadge ok={email} okText="מחובר" missingText="לא מוגדר" />
           </div>
           <p className="connection-value" dir="ltr" style={{ fontSize: 14 }}>
-            {env.emailFrom || 'EMAIL_FROM not set'}
+            {provider === 'gmail' ? env.gmailUser : provider === 'resend' ? env.emailFrom : 'GMAIL_USER not set'}
           </p>
           <p className="muted" style={{ margin: 0, fontSize: 13 }}>
-            נדרש: <Env name="RESEND_API_KEY" /> ו-<Env name="EMAIL_FROM" /> מדומיין שאומת ב-Resend.
+            המיילים יוצאים מחשבון ה-Gmail של העסק ומופיעים אצלו ב&quot;דואר יוצא&quot;. נדרש: <Env name="GMAIL_USER" /> ו-<Env name="GMAIL_APP_PASSWORD" /> (סיסמת אפליקציה של Google).
           </p>
         </div>
 
