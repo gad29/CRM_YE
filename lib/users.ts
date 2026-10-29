@@ -93,7 +93,8 @@ export async function createUser(input: {
   const name = input.name.trim();
   const email = input.email.trim().toLowerCase();
   if (!name || !email.includes('@')) return { ok: false, error: 'שם ואימייל תקין הם שדות חובה' };
-  if (await getUserByEmail(email)) return { ok: false, error: 'כבר קיים משתמש עם האימייל הזה' };
+  const holder = await getUserByEmail(email);
+  if (holder) return { ok: false, error: emailTakenMessage(holder) };
 
   // Ids keep the prefixes the CRM has always used (ADM-11, WRK-101).
   const id = input.role === 'admin' ? await nextId('ADM', 'admin', 10) : await nextId('WRK', 'worker', 100);
@@ -105,6 +106,13 @@ export async function createUser(input: {
   );
   await logActivity({ type: 'user-created', summary: `נוסף ${ROLE_LABELS[input.role]}: ${name} (${email})` });
   return { ok: true, user: toUser(row!) };
+}
+
+/** Say who holds an email — and, if that account is disabled, how to free it. */
+function emailTakenMessage(holder: { name: string; active: boolean }) {
+  return holder.active
+    ? `האימייל הזה כבר שייך ל${holder.name}`
+    : `האימייל הזה שייך לחשבון המושבת של ${holder.name}. כדי להשתמש בו: צוות והרשאות ← ${holder.name} ← מחיקה לצמיתות`;
 }
 
 export async function updateUser(
@@ -129,7 +137,7 @@ export async function updateUser(
     const email = input.email.trim().toLowerCase();
     if (!email.includes('@')) return { ok: false, error: 'כתובת אימייל לא תקינה' };
     const other = await getUserByEmail(email);
-    if (other && other.id !== id) return { ok: false, error: 'כבר קיים משתמש עם האימייל הזה' };
+    if (other && other.id !== id) return { ok: false, error: emailTakenMessage(other) };
     next.email = email;
   }
   if (input.role !== undefined) next.role = input.role;
@@ -248,6 +256,50 @@ export async function activeSessionCounts(): Promise<Map<string, number>> {
     `SELECT account_id, count(*)::int AS n FROM sessions WHERE revoked_at IS NULL AND expires_at > now() GROUP BY account_id`,
   );
   return new Map(rows.map((r) => [r.account_id, r.n]));
+}
+
+/**
+ * Remove a disabled account for good, freeing its email. Whatever it still
+ * handles moves to `transferTo`: cases it handles and its open tasks. Empty
+ * private chats with it go; chats with messages stay as history. The owner
+ * can never be removed, and an active account must be disabled first.
+ */
+export async function deleteUser(id: string, transferTo: string) {
+  const result = await transaction(async () => {
+    const target = await sqlOne('SELECT * FROM users WHERE id = $1 FOR UPDATE', [id]);
+    if (!target) return { ok: false as const, error: 'המשתמש לא נמצא' };
+    if (target.role === 'owner') return { ok: false as const, error: 'אי אפשר למחוק את בעל המערכת' };
+    if (target.active) return { ok: false as const, error: 'קודם משביתים את החשבון, ורק אז מוחקים' };
+    const heir = await sqlOne('SELECT id, name, active FROM users WHERE id = $1', [transferTo]);
+    if (!heir || !heir.active || heir.id === id) return { ok: false as const, error: 'בחרו למי להעביר את התיקים' };
+
+    // Cases this person handles: assigned to them, or opened by them with no one assigned.
+    const cases = await sql(
+      `UPDATE cases SET assigned_to = $2, updated_at = now()
+        WHERE assigned_to = $1 OR (assigned_to IS NULL AND opened_by = $1) RETURNING id`,
+      [id, transferTo],
+    );
+    const tasks = await sql(`UPDATE tasks SET assignee_id = $2, updated_at = now() WHERE assignee_id = $1 AND status = 'open' RETURNING id`, [
+      id,
+      transferTo,
+    ]);
+    await sql(
+      `DELETE FROM chat_channels c WHERE c.kind = 'direct' AND $1 = ANY(c.member_ids)
+          AND NOT EXISTS (SELECT 1 FROM chat_messages m WHERE m.channel_id = c.id)`,
+      [id],
+    );
+    await sql('DELETE FROM sessions WHERE account_id = $1', [id]);
+    await sql('DELETE FROM password_resets WHERE account_id = $1', [id]);
+    await sql('DELETE FROM users WHERE id = $1', [id]);
+    return { ok: true as const, name: target.name as string, email: target.email as string, heirName: heir.name as string, cases: cases.length, tasks: tasks.length };
+  });
+  if (result.ok) {
+    await logActivity({
+      type: 'user-deleted',
+      summary: `נמחק החשבון של ${result.name} (${result.email})${result.cases || result.tasks ? ` — ${[result.cases ? `${result.cases} תיקים` : '', result.tasks ? `${result.tasks} משימות` : ''].filter(Boolean).join(' ו-')} הועברו ל${result.heirName}` : ''}`,
+    });
+  }
+  return result;
 }
 
 // ── Directory used by cases, tasks and chat ─────────────────────────────────

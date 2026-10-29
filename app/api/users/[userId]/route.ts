@@ -6,6 +6,7 @@ import { revokeAccountSessions } from '@/lib/sessions';
 import { logActivity } from '@/lib/store';
 import { canAssignRole, canManage } from '@/lib/user-permissions';
 import {
+  deleteUser,
   getUser,
   listLoginEvents,
   listUserSessions,
@@ -105,4 +106,28 @@ export async function POST(request: NextRequest, { params }: Params) {
   }
 
   return NextResponse.json({ ok: false, error: 'פעולה לא מוכרת' }, { status: 400 });
+}
+
+/**
+ * Remove a disabled account for good (frees its email). Body: { transferTo }
+ * — who takes over the cases and open tasks it still has.
+ */
+export async function DELETE(request: NextRequest, { params }: Params) {
+  const auth = await requireAdmin();
+  if (auth instanceof NextResponse) return auth;
+  const { userId } = await params;
+  const target = await getUser(userId);
+  if (!target) return NextResponse.json({ ok: false, error: 'המשתמש לא נמצא' }, { status: 404 });
+  if (!canManage(auth.session, target) || userId === auth.session.accountId) {
+    return NextResponse.json({ ok: false, error: 'אין לך הרשאה לבצע פעולה זו' }, { status: 403 });
+  }
+  let body: { transferTo?: string };
+  try {
+    body = await request.json();
+  } catch {
+    body = {};
+  }
+  const result = await deleteUser(userId, body.transferTo || auth.session.accountId);
+  if (!result.ok) return NextResponse.json({ ok: false, error: result.error }, { status: 400 });
+  return NextResponse.json({ ok: true, cases: result.cases, tasks: result.tasks });
 }

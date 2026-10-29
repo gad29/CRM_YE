@@ -307,7 +307,7 @@ function NewUserModal({ isOwner, onClose, onCreated }: { isOwner: boolean; onClo
   );
 }
 
-type Confirm = 'deactivate' | 'reset' | 'sign-out' | null;
+type Confirm = 'deactivate' | 'reset' | 'sign-out' | 'delete' | null;
 
 function UserDrawer({
   id,
@@ -332,6 +332,39 @@ function UserDrawer({
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<Confirm>(null);
   const [tempPassword, setTempPassword] = useState<string>();
+  const [heirs, setHeirs] = useState<{ id: string; name: string }[]>([]);
+  const [heirId, setHeirId] = useState('');
+
+  // Who can take over a deleted account's cases: everyone active.
+  useEffect(() => {
+    if (confirm !== 'delete') return;
+    api<{ data: { id: string; name: string; active: boolean; role: Role }[] }>('/api/users').then((res) => {
+      if (!res.ok) return;
+      const active = res.data.filter((u) => u.active && u.id !== id);
+      setHeirs(active);
+      setHeirId((prev) => prev || active.find((u) => u.role === 'owner')?.id || active[0]?.id || '');
+    });
+  }, [confirm, id]);
+
+  async function removeForGood() {
+    if (!user) return;
+    setError('');
+    setBusy(true);
+    const res = await api<{ cases: number; tasks: number }>(`/api/users/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      body: JSON.stringify({ transferTo: heirId }),
+    });
+    setBusy(false);
+    if (!res.ok) {
+      setConfirm(null);
+      setError(res.error || 'המחיקה נכשלה');
+      return;
+    }
+    const moved = [res.cases ? `${res.cases} תיקים` : '', res.tasks ? `${res.tasks} משימות` : ''].filter(Boolean).join(' ו-');
+    toast(`החשבון של ${user.name} נמחק${moved ? ` · ${moved} הועברו` : ''}`);
+    onChanged();
+    onClose();
+  }
 
   const load = useCallback(async () => {
     const res = await api<{ data: Detail }>(`/api/users/${encodeURIComponent(id)}`);
@@ -376,7 +409,7 @@ function UserDrawer({
   }
 
   async function run(kind: Exclude<Confirm, null> | 'reactivate') {
-    if (!user) return;
+    if (!user || kind === 'delete') return;
     setError('');
     setBusy(true);
     const res =
@@ -484,7 +517,29 @@ function UserDrawer({
           {actionable && user && (
             <div className="drawer-section">
               <div className="drawer-section-title">גישה</div>
-              {confirm ? (
+              {confirm === 'delete' ? (
+                <div className="notice warn" style={{ display: 'grid', gap: 10 }}>
+                  <span>
+                    למחוק את החשבון של {user.name} לצמיתות? האימייל <span className="ltr">{user.email}</span> ישתחרר לשימוש. ההיסטוריה נשמרת.
+                  </span>
+                  <label className="field">
+                    <span className="field-label">מי מקבל את התיקים והמשימות הפתוחות שלו</span>
+                    <select value={heirId} onChange={(e) => setHeirId(e.target.value)}>
+                      {heirs.map((h) => (
+                        <option key={h.id} value={h.id}>
+                          {h.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="row">
+                    <button type="button" className="button button-danger button-compact" disabled={busy || !heirId} onClick={() => void removeForGood()}>
+                      מחיקה לצמיתות
+                    </button>
+                    <button type="button" className="button button-quiet button-compact" onClick={() => setConfirm(null)}>ביטול</button>
+                  </div>
+                </div>
+              ) : confirm ? (
                 <div className="notice warn" style={{ display: 'grid', gap: 10 }}>
                   <span>
                     {confirm === 'deactivate' && `להשבית את ${user.name}? הכניסה תיחסם והמכשירים ינותקו. התיקים נשארים במקומם.`}
@@ -516,9 +571,16 @@ function UserDrawer({
                       השבתה
                     </button>
                   ) : (
-                    <button type="button" className="button button-compact" disabled={busy} onClick={() => run('reactivate')}>
-                      החזרה לפעילות
-                    </button>
+                    <>
+                      {user.role !== 'owner' && (
+                        <button type="button" className="button button-quiet button-compact" onClick={() => setConfirm('delete')}>
+                          מחיקה לצמיתות
+                        </button>
+                      )}
+                      <button type="button" className="button button-compact" disabled={busy} onClick={() => run('reactivate')}>
+                        החזרה לפעילות
+                      </button>
+                    </>
                   )}
                 </div>
               )}
