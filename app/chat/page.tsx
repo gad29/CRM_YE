@@ -1,9 +1,13 @@
 'use client';
 
+import '@/app/styles/tools.css';
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { PUBLIC_CHANNEL_ID, REMINDER_CHANNEL_LABELS, type ChatMessage, type ReminderChannel } from '@/lib/domain';
 import { VoiceRecorder } from '@/components/voice-recorder';
+import { useSession } from '@/components/session-provider';
+import { PageHead, initials } from '@/components/ui/bits';
+import { IconArrowRight, IconBell, IconClock, IconDownload, IconFile, IconImage, IconSend, IconTrash, IconX } from '@/components/ui/icons';
 
 type Conversation = {
   id: string;
@@ -21,6 +25,12 @@ type Member = { id: string; name: string; role: 'admin' | 'worker'; email?: stri
 
 const POLL_MS = 4000;
 
+const IconPaperclip = ({ size = 18 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+  </svg>
+);
+
 function timeOf(iso: string) {
   return new Date(iso).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
 }
@@ -34,20 +44,22 @@ function dayOf(iso: string) {
   return date.toLocaleDateString('he-IL', { day: 'numeric', month: 'long', year: 'numeric' });
 }
 
-function fileEmoji(mimeType: string, name: string) {
-  if (mimeType.startsWith('image/')) return '🖼️';
-  if (mimeType === 'application/pdf' || name.toLowerCase().endsWith('.pdf')) return '📄';
-  if (mimeType.includes('word') || /\.(docx?|rtf)$/i.test(name)) return '📝';
-  if (mimeType.includes('sheet') || /\.(xlsx?|csv)$/i.test(name)) return '📊';
-  return '📎';
+/** Short "when" for the conversation list: time today, else the date. */
+function whenOf(iso?: string) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return d.toDateString() === new Date().toDateString()
+    ? timeOf(iso)
+    : d.toLocaleDateString('he-IL', { day: 'numeric', month: 'short' });
 }
 
-function initials(name: string) {
-  return (name || '?').trim()[0]?.toUpperCase() ?? '?';
+function sizeOf(bytes: number) {
+  return bytes > 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)}MB` : `${Math.max(1, Math.round(bytes / 1024))}KB`;
 }
 
 function ChatPageInner() {
   const searchParams = useSearchParams();
+  const { me: viewer } = useSession();
   const [me, setMe] = useState('');
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
@@ -58,7 +70,7 @@ function ChatPageInner() {
   const [pending, setPending] = useState<File[]>([]);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
-  const [showMobileThread, setShowMobileThread] = useState(false);
+  const [showThread, setShowThread] = useState(Boolean(searchParams.get('channel')));
   const [notify, setNotify] = useState(false);
   const [reminderOpen, setReminderOpen] = useState(false);
   const [reminderAt, setReminderAt] = useState('');
@@ -66,9 +78,11 @@ function ChatPageInner() {
 
   const fileRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const listRef = useRef<HTMLDivElement>(null);
+  const textRef = useRef<HTMLTextAreaElement>(null);
 
   const active = useMemo(() => conversations.find((c) => c.id === activeId), [conversations, activeId]);
+  const publicChannels = conversations.filter((c) => c.kind === 'public');
+  const directs = conversations.filter((c) => c.kind === 'direct');
 
   const loadConversations = useCallback(async () => {
     try {
@@ -109,7 +123,7 @@ function ChatPageInner() {
     loadMessages(activeId);
   }, [activeId, loadMessages]);
 
-  // Poll for new messages + conversation list; pause while the tab is hidden.
+  // Poll for new messages and the conversation list; pause while the tab is hidden.
   useEffect(() => {
     const interval = setInterval(() => {
       if (document.visibilityState !== 'visible') return;
@@ -123,6 +137,14 @@ function ChatPageInner() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: 'end' });
   }, [messages.length, activeId]);
+
+  // Grow the text box with its content, up to the CSS max-height.
+  useEffect(() => {
+    const el = textRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${el.scrollHeight}px`;
+  }, [body]);
 
   function toggleReminderChannel(channel: ReminderChannel) {
     setReminderChannels((prev) => (prev.includes(channel) ? prev.filter((c) => c !== channel) : [...prev, channel]));
@@ -167,18 +189,19 @@ function ChatPageInner() {
       }
       const data = await res.json();
       if (!res.ok || !data.ok) {
-        setError(data.error || 'שליחת ההודעה נכשלה');
+        setError(data.error || 'ההודעה לא נשלחה — נסו שוב');
         return;
       }
       setBody('');
       setPending([]);
       setReminderAt('');
       setReminderOpen(false);
+      setNotify(false);
       if (fileRef.current) fileRef.current.value = '';
       await loadMessages(activeId);
       loadConversations();
     } catch {
-      setError('שגיאת תקשורת');
+      setError('אין חיבור לשרת — ההודעה לא נשלחה');
     } finally {
       setSending(false);
     }
@@ -192,144 +215,138 @@ function ChatPageInner() {
   }
 
   function openConversation(id: string) {
+    if (id !== activeId) setMessages([]);
     setActiveId(id);
-    setShowMobileThread(true);
-    setMessages([]);
+    setShowThread(true);
   }
 
   const totalUnread = conversations.reduce((sum, c) => sum + c.unread, 0);
 
-  return (
-    <div>
-      <div className="hero" style={{ marginBottom: 14 }}>
-        <div>
-          <p className="eyebrow">תקשורת</p>
-          <h1 style={{ margin: '6px 0 4px' }}>צ׳אט צוות</h1>
-          <p className="muted" style={{ margin: 0 }}>
-            הודעות פרטיות וקבוצתיות, קבצים, הקלטות קוליות ותזכורות — הכל במקום אחד.
-            {totalUnread > 0 && <strong> · {totalUnread} הודעות חדשות</strong>}
-          </p>
-        </div>
-      </div>
+  const renderConversation = (c: Conversation) => (
+      <button key={c.id} type="button" className={`chat-item ${c.id === activeId ? 'on' : ''}`} onClick={() => openConversation(c.id)}>
+        <span className={`avatar ${c.kind === 'public' ? 'channel' : ''}`}>{c.kind === 'public' ? '#' : initials(c.title)}</span>
+        <span className="chat-item-text">
+          <span className="row" style={{ gap: 6, flexWrap: 'nowrap' }}>
+            <span className="chat-item-name truncate">{c.title}</span>
+            {c.kind === 'direct' && c.otherRole === 'admin' && <span className="chip" style={{ height: 19, fontSize: 11 }}>מנהל</span>}
+            <span className="spacer" />
+            <span className="tiny muted nowrap">{whenOf(c.lastMessageAt)}</span>
+          </span>
+          <span className="chat-item-last truncate">
+            {c.lastMessagePreview ? `${c.lastMessageAuthor ? `${c.lastMessageAuthor}: ` : ''}${c.lastMessagePreview}` : 'עוד אין הודעות'}
+          </span>
+        </span>
+        {c.unread > 0 && <span className="chat-unread">{c.unread}</span>}
+      </button>
+  );
 
-      <div className={`chat-shell ${showMobileThread ? 'show-thread' : ''}`}>
-        {/* Conversation list */}
-        <aside className="chat-list">
-          {conversations.map((c) => (
-            <button
-              key={c.id}
-              type="button"
-              className={`chat-list-item ${c.id === activeId ? 'active' : ''}`}
-              onClick={() => openConversation(c.id)}
-            >
-              <span className={`avatar avatar-sm ${c.kind === 'public' ? '' : 'avatar-soft'}`}>
-                {c.kind === 'public' ? '#' : initials(c.title)}
-              </span>
-              <span className="chat-list-meta">
-                <span className="chat-list-title">
-                  {c.title}
-                  {c.otherRole === 'admin' && c.kind === 'direct' && <span className="kind-badge">מנהל</span>}
-                </span>
-                <span className="chat-list-preview">
-                  {c.lastMessagePreview
-                    ? `${c.lastMessageAuthor ? `${c.lastMessageAuthor}: ` : ''}${c.lastMessagePreview}`
-                    : 'אין הודעות עדיין'}
-                </span>
-              </span>
-              {c.unread > 0 && <span className="chat-unread">{c.unread}</span>}
-            </button>
-          ))}
-          {conversations.length === 0 && <p className="muted" style={{ padding: 12, fontSize: 13 }}>אין שיחות.</p>}
+  const canSend = !sending && (Boolean(body.trim()) || pending.length > 0);
+
+  return (
+    <>
+      <PageHead
+        title="צ׳אט צוות"
+        sub={
+          <>
+            הודעות לצוות ובפרטי, קבצים, הקלטות ותזכורות.
+            {totalUnread > 0 && <strong className="ink-2"> {totalUnread} הודעות שלא נקראו.</strong>}
+          </>
+        }
+      />
+
+      <div className={`chat ${showThread ? 'has-open' : ''}`}>
+        <aside className="chat-list" aria-label="שיחות">
+          {publicChannels.map(renderConversation)}
+          {directs.length > 0 && <div className="chat-list-label">שיחות פרטיות</div>}
+          {directs.map(renderConversation)}
+          {conversations.length === 0 && <p className="muted small" style={{ padding: 12 }}>טוען שיחות…</p>}
         </aside>
 
-        {/* Thread */}
-        <section className="chat-thread">
-          <header className="chat-thread-header">
-            <button type="button" className="chat-back" onClick={() => setShowMobileThread(false)} aria-label="חזרה לרשימה">
-              →
+        <section className="chat-pane" aria-label={active?.title || 'שיחה'}>
+          <header className="chat-pane-head">
+            <button type="button" className="icon-button small chat-back" onClick={() => setShowThread(false)} aria-label="חזרה לרשימת השיחות">
+              <IconArrowRight size={16} />
             </button>
-            <span className={`avatar avatar-sm ${active?.kind === 'public' ? '' : 'avatar-soft'}`}>
+            <span className={`avatar ${active?.kind === 'public' ? 'channel' : ''}`}>
               {active?.kind === 'public' ? '#' : initials(active?.title || '')}
             </span>
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontWeight: 700, fontSize: 15 }}>{active?.title || 'שיחה'}</div>
-              <div className="muted" style={{ fontSize: 11 }}>
-                {active?.kind === 'public' ? `ערוץ צוות · ${members.length} חברים` : 'שיחה פרטית'}
+              <div className="strong truncate">{active?.title || 'שיחה'}</div>
+              <div className="tiny muted">
+                {active?.kind === 'public' ? `כל הצוות · ${members.length} אנשים` : 'רק שניכם רואים את השיחה'}
               </div>
             </div>
           </header>
 
-          <div className="chat-messages" ref={listRef}>
-            {loading && <p className="muted" style={{ textAlign: 'center', fontSize: 13 }}>טוען…</p>}
+          <div className="chat-messages">
+            {loading && messages.length === 0 && <p className="muted small" style={{ textAlign: 'center' }}>טוען הודעות…</p>}
             {!loading && messages.length === 0 && (
-              <p className="muted" style={{ textAlign: 'center', fontSize: 13, marginTop: 20 }}>
-                אין עדיין הודעות בשיחה זו — כתוב את ההודעה הראשונה.
-              </p>
+              <div className="empty" style={{ margin: 'auto' }}>
+                <div className="empty-title">עוד לא נכתב כאן כלום</div>
+                <div className="small">
+                  {active?.kind === 'public' ? 'הודעה כאן מגיעה לכל הצוות.' : `כתבו ל${active?.title || 'עמית'} את ההודעה הראשונה.`}
+                </div>
+              </div>
             )}
             {messages.map((message, index) => {
               const mine = message.authorId === me;
               const previous = messages[index - 1];
               const showDay = !previous || dayOf(previous.createdAt) !== dayOf(message.createdAt);
+              const sameAuthor = previous && !showDay && previous.authorId === message.authorId;
               return (
-                <div key={message.id}>
+                <div key={message.id} style={{ display: 'contents' }}>
                   {showDay && <div className="chat-day">{dayOf(message.createdAt)}</div>}
-                  <div className={`chat-bubble-row ${mine ? 'mine' : ''}`}>
-                    {!mine && <span className="avatar avatar-sm avatar-soft">{initials(message.authorName)}</span>}
-                    <div className={`chat-bubble ${mine ? 'mine' : ''} ${message.deletedAt ? 'deleted' : ''}`}>
-                      {!mine && active?.kind === 'public' && (
-                        <div className="chat-author">{message.authorName}</div>
-                      )}
-                      {message.deletedAt ? (
-                        <div className="muted" style={{ fontSize: 13, fontStyle: 'italic' }}>ההודעה נמחקה</div>
-                      ) : (
-                        <>
-                          {message.body && <div className="chat-text">{message.body}</div>}
-                          {message.attachments.map((a) => {
-                            const src = `/api/chat/files/${message.id}/${a.id}`;
-                            if (a.kind === 'voice') {
-                              return (
-                                <div key={a.id} className="chat-voice">
-                                  <audio controls src={src} />
-                                  {a.durationSec ? <span className="muted" style={{ fontSize: 11 }}>{a.durationSec} שנ׳</span> : null}
-                                </div>
-                              );
-                            }
-                            if (a.kind === 'image') {
-                              return (
-                                <a key={a.id} href={src} target="_blank" rel="noreferrer" className="chat-image">
-                                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                                  <img src={src} alt={a.originalName} />
-                                </a>
-                              );
-                            }
+                  <div className={`bubble ${mine ? 'mine' : ''} ${message.deletedAt ? 'deleted' : ''}`} style={sameAuthor ? { marginTop: -2 } : undefined}>
+                    {!mine && active?.kind === 'public' && !sameAuthor && <div className="bubble-author">{message.authorName}</div>}
+                    {message.deletedAt ? (
+                      <div className="bubble-body">ההודעה נמחקה</div>
+                    ) : (
+                      <>
+                        {message.body && <div className="bubble-body">{message.body}</div>}
+                        {message.attachments.map((a) => {
+                          const src = `/api/chat/files/${message.id}/${a.id}`;
+                          if (a.kind === 'voice') {
                             return (
-                              <a key={a.id} href={`${src}?download=1`} className="chat-file">
-                                <span>{fileEmoji(a.mimeType, a.originalName)}</span>
-                                <span className="chat-file-name">{a.originalName}</span>
-                                <span className="muted" style={{ fontSize: 11 }}>
-                                  {a.size > 1024 * 1024 ? `${(a.size / 1024 / 1024).toFixed(1)}MB` : `${Math.max(1, Math.round(a.size / 1024))}KB`}
-                                </span>
+                              <div key={a.id} className="row" style={{ gap: 6 }}>
+                                <audio controls src={src} preload="none" />
+                                {a.durationSec ? <span className="tiny bubble-meta">{a.durationSec} שנ׳</span> : null}
+                              </div>
+                            );
+                          }
+                          if (a.kind === 'image') {
+                            return (
+                              <a key={a.id} href={src} target="_blank" rel="noreferrer" aria-label={`פתיחת התמונה ${a.originalName}`}>
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img src={src} alt={a.originalName} loading="lazy" />
                               </a>
                             );
-                          })}
-                          {message.reminderAt && (
-                            <div className="chat-reminder">
-                              ⏰ תזכורת ל-{new Date(message.reminderAt).toLocaleString('he-IL', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
-                              {message.reminderChannels?.length
-                                ? ` · ${message.reminderChannels.map((c) => REMINDER_CHANNEL_LABELS[c]).join(', ')}`
-                                : ''}
-                            </div>
-                          )}
-                        </>
-                      )}
-                      <div className="chat-time">
-                        {timeOf(message.createdAt)}
-                        {!message.deletedAt && (
-                          <button type="button" className="chat-delete" onClick={() => removeMessage(message.id)} title="מחק">
-                            ✕
-                          </button>
+                          }
+                          return (
+                            <a key={a.id} href={`${src}?download=1`} className="bubble-file">
+                              {a.mimeType.startsWith('image/') ? <IconImage size={16} /> : <IconFile size={16} />}
+                              <span className="name">{a.originalName}</span>
+                              <span className="tiny" style={{ opacity: 0.7 }}>{sizeOf(a.size)}</span>
+                              <IconDownload size={15} />
+                            </a>
+                          );
+                        })}
+                        {message.reminderAt && (
+                          <div className="bubble-reminder">
+                            <IconClock size={14} />
+                            תזכורת ב-
+                            {new Date(message.reminderAt).toLocaleString('he-IL', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                            {message.reminderChannels?.length ? ` · ${message.reminderChannels.map((c) => REMINDER_CHANNEL_LABELS[c]).join(', ')}` : ''}
+                          </div>
                         )}
-                      </div>
+                      </>
+                    )}
+                    <div className="bubble-meta">
+                      <span className="num">{timeOf(message.createdAt)}</span>
+                      {!message.deletedAt && (mine || viewer?.isAdmin) && (
+                        <button type="button" className="bubble-delete" onClick={() => removeMessage(message.id)} aria-label="מחיקת ההודעה">
+                          <IconTrash size={13} />
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -338,19 +355,15 @@ function ChatPageInner() {
             <div ref={bottomRef} />
           </div>
 
-          {/* Composer */}
           <div className="chat-composer">
             {pending.length > 0 && (
-              <div className="chat-pending">
+              <div className="composer-pending">
                 {pending.map((file, index) => (
-                  <span key={`${file.name}-${index}`} className="doc-file-chip">
-                    {fileEmoji(file.type, file.name)} {file.name}
-                    <button
-                      type="button"
-                      onClick={() => setPending((prev) => prev.filter((_, i) => i !== index))}
-                      style={{ border: 'none', background: 'none', cursor: 'pointer', color: 'inherit' }}
-                    >
-                      ✕
+                  <span key={`${file.name}-${index}`} className="file-pill">
+                    {file.type.startsWith('image/') ? <IconImage size={13} /> : <IconFile size={13} />}
+                    <span className="truncate">{file.name}</span>
+                    <button type="button" onClick={() => setPending((prev) => prev.filter((_, i) => i !== index))} aria-label={`הסרת ${file.name}`}>
+                      <IconX size={13} />
                     </button>
                   </span>
                 ))}
@@ -358,21 +371,26 @@ function ChatPageInner() {
             )}
 
             {reminderOpen && (
-              <div className="chat-reminder-box">
-                <span className="muted" style={{ fontSize: 12 }}>תזכורת:</span>
-                <input
-                  type="datetime-local"
-                  value={reminderAt}
-                  onChange={(e) => setReminderAt(e.target.value)}
-                  style={{ padding: '6px 8px', borderRadius: 8, border: '1px solid var(--line)', background: 'var(--surface)', color: 'var(--text)' }}
-                />
+              <div className="composer-reminder">
+                <IconClock size={15} />
+                <span>תזכורת למקבלים ב-</span>
+                <input type="datetime-local" value={reminderAt} onChange={(e) => setReminderAt(e.target.value)} aria-label="מועד התזכורת" />
                 {(Object.entries(REMINDER_CHANNEL_LABELS) as [ReminderChannel, string][]).map(([value, label]) => (
-                  <label key={value} className={`choice-card ${reminderChannels.includes(value) ? 'selected' : ''}`} style={{ padding: '6px 10px', fontSize: 12 }}>
+                  <label key={value} className="checkbox small">
                     <input type="checkbox" checked={reminderChannels.includes(value)} onChange={() => toggleReminderChannel(value)} />
-                    <span>{value === 'email' ? '📧' : '💬'} {label}</span>
+                    {label}
                   </label>
                 ))}
-                <button type="button" className="doc-action-btn" onClick={() => { setReminderOpen(false); setReminderAt(''); }}>בטל</button>
+                <span className="spacer" />
+                <button type="button" className="button button-quiet button-compact" onClick={() => { setReminderOpen(false); setReminderAt(''); }}>
+                  הסרת התזכורת
+                </button>
+              </div>
+            )}
+
+            {notify && (
+              <div className="tiny muted row" style={{ gap: 6 }}>
+                <IconBell size={13} /> ההודעה תישלח גם במייל או בוואטסאפ למי שבשיחה.
               </div>
             )}
 
@@ -381,33 +399,40 @@ function ChatPageInner() {
                 ref={fileRef}
                 type="file"
                 multiple
-                style={{ display: 'none' }}
+                hidden
                 onChange={(e) => {
-                  if (e.target.files) setPending((prev) => [...prev, ...Array.from(e.target.files as FileList)]);
+                  const files = e.target.files;
+                  if (files) setPending((prev) => [...prev, ...Array.from(files)]);
                 }}
               />
-              <button type="button" className="composer-btn" onClick={() => fileRef.current?.click()} title="צירוף קבצים">📎</button>
+              <button type="button" className="icon-button composer-btn" onClick={() => fileRef.current?.click()} aria-label="צירוף קבצים" title="צירוף קבצים">
+                <IconPaperclip />
+              </button>
               <VoiceRecorder disabled={sending} onRecorded={(blob, duration) => void send({ blob, duration })} />
               <button
                 type="button"
-                className={`composer-btn ${reminderOpen ? 'active' : ''}`}
+                className={`icon-button composer-btn ${reminderOpen ? 'on' : ''}`}
                 onClick={() => setReminderOpen((v) => !v)}
+                aria-pressed={reminderOpen}
+                aria-label="הוספת תזכורת"
                 title="הוספת תזכורת"
               >
-                ⏰
+                <IconClock />
               </button>
               <button
                 type="button"
-                className={`composer-btn ${notify ? 'active' : ''}`}
+                className={`icon-button composer-btn ${notify ? 'on' : ''}`}
                 onClick={() => setNotify((v) => !v)}
-                title="שליחת התראה במייל/וואטסאפ על ההודעה"
+                aria-pressed={notify}
+                aria-label="לשלוח גם התראה במייל או בוואטסאפ"
+                title="לשלוח גם התראה במייל או בוואטסאפ"
               >
-                🔔
+                <IconBell />
               </button>
               <textarea
-                className="chat-input"
+                ref={textRef}
                 rows={1}
-                placeholder="כתוב הודעה…"
+                placeholder="כתבו הודעה…  (Shift+Enter לשורה חדשה)"
                 value={body}
                 onChange={(e) => setBody(e.target.value)}
                 onKeyDown={(e) => {
@@ -416,21 +441,17 @@ function ChatPageInner() {
                     void send();
                   }
                 }}
+                aria-label="הודעה"
               />
-              <button
-                type="button"
-                className="button button-compact"
-                disabled={sending || (!body.trim() && pending.length === 0)}
-                onClick={() => void send()}
-              >
-                {sending ? '…' : 'שלח'}
+              <button type="button" className="button composer-btn" style={{ padding: 0 }} disabled={!canSend} onClick={() => void send()} aria-label="שליחה">
+                <IconSend size={17} />
               </button>
             </div>
-            {error && <p className="form-error" style={{ margin: '6px 0 0' }}>{error}</p>}
+            {error && <p className="form-error">{error}</p>}
           </div>
         </section>
       </div>
-    </div>
+    </>
   );
 }
 

@@ -1,0 +1,191 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   Extras for the tool pages: tasks, chat, payments, settings, connections.
+   Builds only on the tokens and classes in app/globals.css.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Tasks ────────────────────────────────────────────────────────────────── */
+
+.task-group + .task-group { margin-top: 22px; }
+
+.task-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 4px 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink-2);
+}
+.task-group-head .n { color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; }
+.task-group.overdue .task-group-head { color: var(--red); }
+
+.task-list {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-1);
+  padding: 2px 14px;
+}
+
+.task-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 13px 2px;
+  border-bottom: 1px solid var(--line);
+}
+.task-row:last-child { border-bottom: 0; }
+
+.task-check {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  margin-top: 1px;
+  border-radius: 50%;
+  border: 1.5px solid var(--line-strong);
+  background: var(--surface);
+  color: transparent;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  transition: background var(--fast) var(--ease), border-color var(--fast) var(--ease), color var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+.task-check:hover { border-color: var(--green); color: var(--green); }
+.task-check:active { transform: scale(0.9); }
+.task-row.done .task-check { background: var(--green); border-color: var(--green); color: #fff; }
+
+.task-main { flex: 1; min-width: 0; display: grid; gap: 3px; }
+.task-title {
+  font-weight: 600;
+  border: 0;
+  background: none;
+  padding: 0;
+  text-align: start;
+  color: var(--ink);
+  transition: color var(--fast) var(--ease);
+}
+button.task-title:hover { color: var(--accent); }
+.task-row.done .task-title { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--line-strong); }
+.task-notes { font-size: 13px; color: var(--ink-2); white-space: pre-wrap; }
+.task-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; font-size: 12.5px; color: var(--muted); }
+.task-meta span, .task-meta a { display: inline-flex; align-items: center; gap: 5px; }
+.task-meta .late { color: var(--red); font-weight: 600; }
+.task-row .priority-mark { width: 3px; align-self: stretch; border-radius: 2px; flex-shrink: 0; background: transparent; }
+.task-row .priority-mark.high { background: var(--amber); }
+.task-row .priority-mark.urgent { background: var(--red); }
+
+/* ── Chat extras ──────────────────────────────────────────────────────────── */
+
+.chat-item-text { display: grid; gap: 1px; min-width: 0; flex: 1; }
+.chat-item .avatar.channel { background: var(--ink); color: var(--surface); }
+.chat-list-label { font-size: 11.5px; font-weight: 700; color: var(--muted); padding: 10px 10px 4px; letter-spacing: 0.02em; }
+.chat-pane-head .chat-back { display: none; }
+
+.bubble-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: color-mix(in srgb, currentColor 7%, transparent);
+  font-size: 13px;
+  max-width: 280px;
+}
+.bubble-file .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.bubble-reminder { display: flex; align-items: center; gap: 5px; margin-top: 6px; font-size: 12px; font-weight: 600; }
+.bubble-delete {
+  border: 0;
+  background: none;
+  padding: 0 2px;
+  color: inherit;
+  opacity: 0;
+  display: inline-grid;
+  place-items: center;
+  transition: opacity var(--fast) var(--ease);
+}
+.bubble:hover .bubble-delete, .bubble-delete:focus-visible { opacity: 0.8; }
+
+.composer-pending { display: flex; flex-wrap: wrap; gap: 6px; }
+.composer-pending .file-pill button { border: 0; background: none; padding: 0; color: var(--muted); display: inline-grid; place-items: center; }
+.composer-reminder { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px; border-radius: var(--radius); background: var(--amber-soft); font-size: 13px; }
+.composer-reminder input[type='datetime-local'] { height: 32px; padding: 0 8px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--surface); }
+.composer-btn.on { background: var(--accent-soft); color: var(--accent-strong); border-color: transparent; }
+
+@media (max-width: 960px) {
+  .chat-pane-head .chat-back { display: inline-grid; }
+}
+
+/* ── Payments ─────────────────────────────────────────────────────────────── */
+
+.tray-row.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.money { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.money.due { color: var(--red); font-weight: 700; }
+.money.clear { color: var(--green); font-weight: 600; }
+.table tr.awaiting td:first-child { box-shadow: inset -3px 0 0 var(--amber); }
+.pay-progress { height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; margin-top: 6px; width: 100%; min-width: 70px; }
+.pay-progress > span { display: block; height: 100%; background: var(--green); border-radius: 2px; }
+
+@media (max-width: 960px) {
+  .tray-row.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ── Settings ─────────────────────────────────────────────────────────────── */
+
+.settings-wrap { max-width: 880px; }
+.edit-list { display: grid; gap: 8px; }
+.edit-row { display: flex; align-items: center; gap: 8px; }
+.edit-row .input { flex: 1; }
+.edit-row .key { min-width: 130px; font-size: 13px; color: var(--muted); }
+.swatch-input {
+  width: 40px;
+  height: 40px;
+  padding: 3px;
+  border-radius: 10px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.swatch-input::-webkit-color-swatch-wrapper { padding: 0; }
+.swatch-input::-webkit-color-swatch { border: 0; border-radius: 7px; }
+.swatch-input::-moz-color-swatch { border: 0; border-radius: 7px; }
+.card-foot { display: flex; align-items: center; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+.saved-note { display: inline-flex; align-items: center; gap: 5px; color: var(--green); font-size: 13px; font-weight: 600; animation: fade-in var(--base) var(--ease) both; }
+.company-preview { display: flex; gap: 14px; flex-wrap: wrap; padding-top: 4px; }
+.company-preview .folder { margin-top: 22px; width: 150px; padding: 10px 12px; min-height: 52px; }
+.paste-box { font-family: var(--font-mono); font-size: 12px; direction: rtl; }
+
+/* ── Connections ──────────────────────────────────────────────────────────── */
+
+.conn-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.conn-card { display: grid; gap: 8px; align-content: start; }
+.conn-card + .conn-card { margin-top: 0; }
+.conn-head { display: flex; align-items: center; gap: 10px; }
+.conn-head .icon { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: var(--surface-2); border: 1px solid var(--line); color: var(--ink-2); flex-shrink: 0; }
+.conn-value { font-family: var(--font-mono); font-size: 13px; direction: ltr; text-align: right; color: var(--ink); overflow-wrap: anywhere; }
+.status-dot { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; margin-inline-start: auto; }
+.status-dot::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.status-dot.ok { color: var(--green); }
+.status-dot.off { color: var(--amber); }
+code.env { font-family: var(--font-mono); font-size: 12px; padding: 1px 6px; border-radius: 5px; background: var(--surface-2); border: 1px solid var(--line); direction: ltr; unicode-bidi: isolate; }
+.test-form { display: flex; gap: 8px; }
+.test-form .input { flex: 1; }
+
+@media (max-width: 960px) {
+  .conn-grid { grid-template-columns: minmax(0, 1fr); }
+  .edit-row .key { min-width: 90px; }
+}
+
+/* The chat fills the window under the page title, composer always in view. */
+.page .chat { height: calc(100vh - 205px); height: calc(100dvh - 205px); }
+
+@media (max-width: 960px) {
+  .page .chat { height: calc(100vh - 180px); height: calc(100dvh - 180px); min-height: 420px; }
+}
+
+@media (max-width: 640px) {
+  .chat-composer-row { flex-wrap: wrap; }
+  .chat-composer textarea { order: -1; flex: 1 1 100%; }
+  .chat-composer-row > .button.composer-btn { margin-inline-start: auto; }
+}

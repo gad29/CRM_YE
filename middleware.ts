@@ -13,7 +13,7 @@ function isPublicPath(pathname: string) {
   if (pathname === '/login' || pathname === '/forgot') return true;
   if (pathname === '/api/auth/login' || pathname === '/api/auth/me') return true;
   if (pathname === '/api/auth/forgot' || pathname === '/api/auth/reset') return true;
-  if (pathname === '/api/health') return true;
+  if (pathname === '/api/health' || pathname === '/api/branding') return true;
   // Shared document links are token-protected inside the route.
   if (pathname.startsWith('/api/share/')) return true;
   // Meta delivery-status webhook — verified by its X-Hub-Signature-256.
@@ -23,20 +23,16 @@ function isPublicPath(pathname: string) {
 
 /** Pages and APIs reserved for admins (workers are redirected / rejected). */
 function isAdminOnlyPath(pathname: string) {
+  const under = (prefix: string) => pathname === prefix || pathname.startsWith(`${prefix}/`);
   return (
-    pathname === '/payments' ||
-    pathname.startsWith('/payments/') ||
-    pathname === '/workers' ||
-    pathname.startsWith('/workers/') ||
-    pathname === '/settings' ||
-    pathname.startsWith('/settings/') ||
-    pathname === '/connections' ||
-    pathname.startsWith('/api/payments') ||
-    pathname.startsWith('/api/workers') ||
-    pathname.startsWith('/api/admins') ||
-    pathname.startsWith('/api/settings') ||
-    pathname.startsWith('/api/import') ||
-    pathname.startsWith('/api/integrations')
+    under('/admin') ||
+    under('/payments') ||
+    under('/api/payments') ||
+    under('/api/users') ||
+    under('/api/settings') ||
+    under('/api/import') ||
+    under('/api/integrations') ||
+    under('/api/activity')
   );
 }
 
@@ -88,7 +84,7 @@ export async function middleware(request: NextRequest) {
       if (pathname.startsWith('/api/')) {
         return NextResponse.json({ ok: false, error: 'Admin access required' }, { status: 403 });
       }
-      return NextResponse.redirect(new URL('/dashboard', request.url));
+      return NextResponse.redirect(new URL('/today', request.url));
     }
     return NextResponse.next();
   }

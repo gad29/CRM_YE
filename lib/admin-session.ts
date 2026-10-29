@@ -1,10 +1,9 @@
 // Session cookie ↔ server-side session (Node runtime: route handlers and server pages).
-// One cookie serves admins and workers; `scope` tells them apart.
+// One cookie for everyone; `scope` ('admin' | 'worker') follows the person's role.
 //
 // The cookie (lib/session-token.ts) carries a signed session id + scope; the
 // session row in PostgreSQL is what actually grants access, so sign-out,
-// deactivation and password changes take effect on the very next request.
-import crypto from 'node:crypto';
+// deactivation, role and password changes take effect on the very next request.
 import { cookies } from 'next/headers';
 import type { NextRequest } from 'next/server';
 import { env, isProductionLike } from '@/lib/env';
@@ -19,12 +18,15 @@ const DEFAULT_SESSION_HOURS = 24;
 export type SessionPayload = {
   sid: string;
   scope: SessionScope;
-  /** 'admin' (root), ADM-x or WRK-x. */
+  /** The signed-in person's user id ('admin' is the owner). */
   accountId: string;
+  role: 'owner' | 'admin' | 'worker';
   email?: string;
   /** Set when scope === 'worker'. */
   workerId?: string;
   name?: string;
+  /** An admin issued a temporary password — the person must pick their own. */
+  mustChangePassword: boolean;
   expiresAt: string;
 };
 
@@ -33,25 +35,20 @@ function getSessionHours() {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SESSION_HOURS;
 }
 
-/** Fingerprint of the root admin's .env credential — rotating it ends root sessions. */
-function rootCredentialTag() {
-  const credential = env.adminPasswordHash || env.adminPassword || '';
-  return crypto.createHash('sha256').update(`crmye-root:${credential}`).digest('hex').slice(0, 24);
-}
-
 async function resolveToken(token: string | undefined | null): Promise<SessionPayload | null> {
   const verified = await verifySessionToken(token);
   if (!verified) return null;
   const session = await findActiveSession(verified.sid);
   if (!session || session.scope !== verified.scope) return null;
-  if (session.accountId === 'admin' && session.credentialTag !== rootCredentialTag()) return null;
   return {
     sid: session.id,
     scope: session.scope,
     accountId: session.accountId,
+    role: session.role ?? (session.scope === 'worker' ? 'worker' : 'admin'),
     email: session.email,
     workerId: session.scope === 'worker' ? session.accountId : undefined,
     name: session.name,
+    mustChangePassword: Boolean(session.mustChangePassword),
     expiresAt: session.expiresAt,
   };
 }
@@ -65,11 +62,7 @@ export async function startSession(input: {
   ip?: string;
   userAgent?: string;
 }) {
-  const session = await createSession({
-    ...input,
-    hours: getSessionHours(),
-    credentialTag: input.accountId === 'admin' ? rootCredentialTag() : undefined,
-  });
+  const session = await createSession({ ...input, hours: getSessionHours() });
   return signSessionToken(session.id, session.scope);
 }
 

@@ -13,7 +13,9 @@ export interface SessionRow {
   email?: string;
   name?: string;
   expiresAt: string;
-  credentialTag?: string;
+  /** Live role from the users table (owner / admin / worker). */
+  role?: 'owner' | 'admin' | 'worker';
+  mustChangePassword?: boolean;
 }
 
 export async function createSession(input: {
@@ -22,15 +24,14 @@ export async function createSession(input: {
   email?: string;
   name?: string;
   hours: number;
-  credentialTag?: string;
   ip?: string;
   userAgent?: string;
 }): Promise<SessionRow> {
   const id = crypto.randomBytes(32).toString('base64url');
   const expiresAt = new Date(Date.now() + input.hours * 60 * 60 * 1000).toISOString();
   await sql(
-    `INSERT INTO sessions (id, scope, account_id, email, name, expires_at, ip, user_agent, credential_tag)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    `INSERT INTO sessions (id, scope, account_id, email, name, expires_at, ip, user_agent)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
     [
       id,
       input.scope,
@@ -40,14 +41,13 @@ export async function createSession(input: {
       expiresAt,
       input.ip ?? null,
       input.userAgent ? input.userAgent.slice(0, 300) : null,
-      input.credentialTag ?? null,
     ],
   );
   // Expired rows are useless; sweep them now and then.
   if (Math.random() < 0.05) {
     void sql("DELETE FROM sessions WHERE expires_at < now() - interval '30 days'").catch(() => undefined);
   }
-  return { id, scope: input.scope, accountId: input.accountId, email: input.email, name: input.name, expiresAt, credentialTag: input.credentialTag };
+  return { id, scope: input.scope, accountId: input.accountId, email: input.email, name: input.name, expiresAt };
 }
 
 /**
@@ -56,18 +56,16 @@ export async function createSession(input: {
  */
 export async function findActiveSession(id: string): Promise<SessionRow | null> {
   const row = await sqlOne(
-    `SELECT s.*,
-            CASE
-              WHEN s.account_id = 'admin' THEN true
-              WHEN s.scope = 'admin' THEN (SELECT a.active FROM admins a WHERE a.id = s.account_id)
-              ELSE (SELECT w.active FROM workers w WHERE w.id = s.account_id)
-            END AS account_active,
-            s.last_seen_at < now() - interval '5 minutes' AS stale
-       FROM sessions s
+    `SELECT s.*, u.active AS account_active, u.role AS account_role, u.name AS account_name,
+            u.must_change_password, s.last_seen_at < now() - interval '5 minutes' AS stale
+       FROM sessions s JOIN users u ON u.id = s.account_id
       WHERE s.id = $1 AND s.revoked_at IS NULL AND s.expires_at > now()`,
     [id],
   );
   if (!row || row.account_active !== true) return null;
+  // The scope a session was opened with must still match the person's role.
+  const scope: SessionScope = row.account_role === 'worker' ? 'worker' : 'admin';
+  if (scope !== row.scope) return null;
   if (row.stale) {
     // Throttled so a busy page doesn't write on every request.
     void sql('UPDATE sessions SET last_seen_at = now() WHERE id = $1', [id]).catch(() => undefined);
@@ -77,10 +75,28 @@ export async function findActiveSession(id: string): Promise<SessionRow | null> 
     scope: row.scope,
     accountId: row.account_id,
     email: row.email ?? undefined,
-    name: row.name ?? undefined,
+    // The current name, so a rename shows up without signing in again.
+    name: row.account_name ?? row.name ?? undefined,
     expiresAt: new Date(row.expires_at).toISOString(),
-    credentialTag: row.credential_tag ?? undefined,
+    role: row.account_role,
+    mustChangePassword: Boolean(row.must_change_password),
   };
+}
+
+/** End every other session of an account (e.g. "sign out my other devices"). */
+export async function revokeOtherSessions(accountId: string, keepId: string) {
+  return sqlCount('UPDATE sessions SET revoked_at = now() WHERE account_id = $1 AND id <> $2 AND revoked_at IS NULL', [
+    accountId,
+    keepId,
+  ]);
+}
+
+/** End one session of an account (the account check stops cross-account revokes). */
+export async function revokeAccountSession(accountId: string, sessionId: string) {
+  return sqlCount('UPDATE sessions SET revoked_at = now() WHERE account_id = $1 AND id = $2 AND revoked_at IS NULL', [
+    accountId,
+    sessionId,
+  ]);
 }
 
 export async function revokeSession(id: string) {

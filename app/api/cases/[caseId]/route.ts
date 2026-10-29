@@ -4,7 +4,6 @@ import {
   CASE_STAGES,
   caseHandlerId,
   countMissingItems,
-  isManagerId,
   officeDisplayName,
   type CaseKind,
   type CaseStage,
@@ -23,9 +22,9 @@ import {
   listActivity,
   listCaseDocuments,
   listCasePayments,
-  personDirectory,
   updateCase,
 } from '@/lib/store';
+import { personDirectory } from '@/lib/users';
 import { getViewer } from '@/lib/viewer';
 
 type Params = { params: Promise<{ caseId: string }> };
@@ -46,7 +45,7 @@ export async function GET(_request: NextRequest, { params }: Params) {
   const casePayments = await listCasePayments(caseId);
   const nameOf = (id?: string) => (id ? people.get(id)?.name || '' : '');
   const handlerId = caseHandlerId(caseRecord);
-  const active = [...people.values()].filter((p) => p.active).map(({ id, name }) => ({ id, name }));
+  const active = [...people.values()].filter((p) => p.active);
   return NextResponse.json({
     ok: true,
     data: {
@@ -56,7 +55,7 @@ export async function GET(_request: NextRequest, { params }: Params) {
         missingItems: countMissingItems(caseRecord),
         finance: getCaseFinance(caseRecord, casePayments),
         assignedToName: nameOf(caseRecord.assignedTo),
-        openedByName: caseRecord.openedBy === 'admin' ? '' : nameOf(caseRecord.openedBy),
+        openedByName: nameOf(caseRecord.openedBy),
         handlerId,
         handlerName: nameOf(handlerId),
       },
@@ -65,8 +64,8 @@ export async function GET(_request: NextRequest, { params }: Params) {
       payments: isAdmin ? casePayments : [],
       activity: await listActivity({ caseId, limit: 30 }),
       // Who a case can be transferred to: managers for everyone, workers for admins.
-      managers: active.filter((p) => isManagerId(p.id)),
-      workers: isAdmin ? active.filter((p) => !isManagerId(p.id)) : [],
+      managers: active.filter((p) => p.role === 'admin').map(({ id, name }) => ({ id, name })),
+      workers: isAdmin ? active.filter((p) => p.role === 'worker').map(({ id, name }) => ({ id, name })) : [],
       canManagePayments: isAdmin,
       canAssign: isAdmin,
       canTransferToManager: !isAdmin,
@@ -121,7 +120,7 @@ export async function PATCH(request: NextRequest, { params }: Params) {
     const target = String(body.assignedTo).trim();
     const person = target ? (await personDirectory()).get(target) : undefined;
     if (auth.viewer.role !== 'admin') {
-      if (!person || !person.active || !isManagerId(target)) {
+      if (!person || !person.active || person.role !== 'admin') {
         return NextResponse.json({ ok: false, error: 'עובד יכול להעביר תיק רק למנהל' }, { status: 403 });
       }
     } else if (target && (!person || !person.active)) {

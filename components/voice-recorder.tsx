@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { IconSend, IconX } from '@/components/ui/icons';
 
 type Props = {
   /** Called with the recorded clip once the user confirms. */
@@ -14,6 +15,19 @@ function formatDuration(seconds: number) {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+export const IconMic = ({ size = 18 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <rect x="9" y="2" width="6" height="12" rx="3" />
+    <path d="M19 10v1a7 7 0 0 1-14 0v-1M12 18v4M8 22h8" />
+  </svg>
+);
+
+const IconStop = ({ size = 14 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <rect x="6" y="6" width="12" height="12" rx="2" />
+  </svg>
+);
+
 /** Microphone recorder for chat voice notes (MediaRecorder + preview before sending). */
 export function VoiceRecorder({ onRecorded, disabled }: Props) {
   const [recording, setRecording] = useState(false);
@@ -25,20 +39,21 @@ export function VoiceRecorder({ onRecorded, disabled }: Props) {
   const chunksRef = useRef<BlobPart[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const secondsRef = useRef(0);
+  const previewRef = useRef<string | null>(null);
 
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       streamRef.current?.getTracks().forEach((t) => t.stop());
-      if (preview) URL.revokeObjectURL(preview.url);
+      if (previewRef.current) URL.revokeObjectURL(previewRef.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function start() {
     setError('');
     if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
-      setError('הדפדפן אינו תומך בהקלטה');
+      setError('הדפדפן הזה לא תומך בהקלטה');
       return;
     }
     try {
@@ -52,17 +67,22 @@ export function VoiceRecorder({ onRecorded, disabled }: Props) {
       recorder.onstop = () => {
         const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' });
         const url = URL.createObjectURL(blob);
-        setPreview({ url, blob, duration: seconds });
+        previewRef.current = url;
+        setPreview({ url, blob, duration: secondsRef.current });
         streamRef.current?.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
       };
       recorder.start();
       recorderRef.current = recorder;
+      secondsRef.current = 0;
       setSeconds(0);
       setRecording(true);
-      timerRef.current = setInterval(() => setSeconds((s) => s + 1), 1000);
+      timerRef.current = setInterval(() => {
+        secondsRef.current += 1;
+        setSeconds(secondsRef.current);
+      }, 1000);
     } catch {
-      setError('אין הרשאה לשימוש במיקרופון');
+      setError('אין הרשאה למיקרופון — אפשרו אותה בהגדרות הדפדפן');
     }
   }
 
@@ -72,6 +92,12 @@ export function VoiceRecorder({ onRecorded, disabled }: Props) {
     recorderRef.current?.stop();
     recorderRef.current = null;
     setRecording(false);
+  }
+
+  function clearPreview() {
+    if (previewRef.current) URL.revokeObjectURL(previewRef.current);
+    previewRef.current = null;
+    setPreview(null);
   }
 
   function cancel() {
@@ -84,8 +110,7 @@ export function VoiceRecorder({ onRecorded, disabled }: Props) {
     }
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
-    if (preview) URL.revokeObjectURL(preview.url);
-    setPreview(null);
+    clearPreview();
     setRecording(false);
     setSeconds(0);
   }
@@ -93,29 +118,37 @@ export function VoiceRecorder({ onRecorded, disabled }: Props) {
   function send() {
     if (!preview) return;
     onRecorded(preview.blob, preview.duration || seconds);
-    URL.revokeObjectURL(preview.url);
-    setPreview(null);
+    clearPreview();
     setSeconds(0);
   }
 
   if (preview) {
     return (
       <div className="voice-preview">
-        <audio controls src={preview.url} style={{ height: 32 }} />
-        <span className="muted" style={{ fontSize: 12 }}>{formatDuration(preview.duration || seconds)}</span>
-        <button type="button" className="doc-action-btn approve" onClick={send}>שלח הקלטה</button>
-        <button type="button" className="doc-action-btn reject" onClick={cancel}>בטל</button>
+        <audio controls src={preview.url} style={{ height: 34 }} />
+        <span className="muted tiny num">{formatDuration(preview.duration || seconds)}</span>
+        <button type="button" className="button button-compact" onClick={send}>
+          <IconSend size={15} /> שליחת ההקלטה
+        </button>
+        <button type="button" className="button button-quiet button-compact" onClick={cancel}>
+          ביטול
+        </button>
       </div>
     );
   }
 
   if (recording) {
     return (
-      <div className="voice-preview">
-        <span className="rec-dot" />
-        <span style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>{formatDuration(seconds)}</span>
-        <button type="button" className="doc-action-btn approve" onClick={stop}>⏹ סיים</button>
-        <button type="button" className="doc-action-btn reject" onClick={cancel}>בטל</button>
+      <div className="voice-preview" role="status" aria-live="polite">
+        <span className="rec-dot" aria-hidden="true" />
+        <span className="num strong">{formatDuration(seconds)}</span>
+        <span className="muted small">מקליט…</span>
+        <button type="button" className="button button-secondary button-compact" onClick={stop}>
+          <IconStop /> סיום
+        </button>
+        <button type="button" className="icon-button small" onClick={cancel} aria-label="ביטול ההקלטה">
+          <IconX size={15} />
+        </button>
       </div>
     );
   }
@@ -124,15 +157,15 @@ export function VoiceRecorder({ onRecorded, disabled }: Props) {
     <>
       <button
         type="button"
-        className="composer-btn"
+        className="icon-button composer-btn"
         onClick={start}
         disabled={disabled}
         title="הקלטת הודעה קולית"
         aria-label="הקלטת הודעה קולית"
       >
-        🎤
+        <IconMic />
       </button>
-      {error && <span className="form-error" style={{ fontSize: 12, margin: 0 }}>{error}</span>}
+      {error && <span className="form-error tiny">{error}</span>}
     </>
   );
 }

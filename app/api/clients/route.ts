@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { countMissingItems, type CaseKind, type OperatingCompany } from '@/lib/domain';
-import { createCase, createClient, getCaseFinance, getConfig, listCases, listPayments, listVisibleClients } from '@/lib/store';
+import { countMissingItems, type CaseKind, type OperatingCompany, type GovernmentOffice } from '@/lib/domain';
+import { caseVisibleTo, createCase, createClient, getCaseFinance, getConfig, listCases, listPayments, listVisibleClients } from '@/lib/store';
 import { actorId, getViewer } from '@/lib/viewer';
 
 export async function GET() {
@@ -9,7 +9,8 @@ export async function GET() {
   if (!auth) return NextResponse.json({ ok: false }, { status: 401 });
 
   const clients = await listVisibleClients(auth.viewer);
-  const cases = await listCases();
+  // Counts and balances only from the cases this person may see.
+  const cases = (await listCases()).filter((c) => caseVisibleTo(c, auth.viewer));
   const payments = await listPayments();
 
   const enriched = clients.map((client) => {
@@ -50,6 +51,11 @@ export async function POST(request: NextRequest) {
       company?: OperatingCompany;
       caseKind?: CaseKind;
       fee?: number;
+      /** Exactly which documents to require (template codes) — overrides seedChecklist. */
+      checklistCodes?: string[];
+      /** Extra required documents, free text. */
+      customChecklist?: string[];
+      office?: string;
       /** Whether to pre-load the document checklist into the new case. */
       seedChecklist?: boolean;
     };
@@ -90,12 +96,19 @@ export async function POST(request: NextRequest) {
     caseRecord = await createCase({
       clientId: record.id,
       title: body.case?.title?.trim() || config.defaultCaseTitle,
-      office: 'housing-ministry',
+      office: (body.case?.office as GovernmentOffice | undefined) || 'housing-ministry',
       company: body.case?.company,
       caseKind: body.case?.caseKind || 'new',
       fee: body.case?.fee ?? config.defaultFee,
       openedBy: creator,
-      checklistCodes: seed ? config.documentTemplates.map((t) => t.code) : [],
+      checklistCodes: Array.isArray(body.case?.checklistCodes)
+        ? body.case.checklistCodes.filter((c): c is string => typeof c === 'string')
+        : seed
+          ? config.documentTemplates.map((t) => t.code)
+          : [],
+      customChecklist: Array.isArray(body.case?.customChecklist)
+        ? body.case.customChecklist.filter((c): c is string => typeof c === 'string').slice(0, 30)
+        : [],
     });
   }
 

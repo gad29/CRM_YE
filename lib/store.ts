@@ -46,8 +46,8 @@ import { env } from '@/lib/env';
 import { documentsLinkMessage, passwordResetMessage, taskAssignedMessage } from '@/lib/messages';
 import { deliver, directChannelAvailable, type DeliveryChannel } from '@/lib/notify';
 import { consumeRateLimit } from '@/lib/rate-limit';
-import { revokeAccountSessions } from '@/lib/sessions';
 import { signShareToken } from '@/lib/share';
+import { assigneeContact, personDirectory } from '@/lib/users';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>;
@@ -1216,263 +1216,6 @@ export async function getDashboardSummary(caseFilter?: (caseRecord: CaseRecord) 
   };
 }
 
-// ── Workers ──────────────────────────────────────────────────────────────────
-
-function toPerson(row: Row) {
-  return {
-    id: row.id as string,
-    name: row.name as string,
-    email: row.email as string,
-    phone: opt(row.phone) as string | undefined,
-    passwordHash: row.password_hash as string,
-    active: Boolean(row.active),
-    createdAt: iso(row.created_at),
-    updatedAt: iso(row.updated_at),
-  };
-}
-
-export async function listWorkers(): Promise<WorkerRecord[]> {
-  return (await sql('SELECT * FROM workers ORDER BY created_at DESC, length(id) DESC, id DESC')).map(toPerson);
-}
-
-export async function getWorker(workerId: string): Promise<WorkerRecord | undefined> {
-  const row = await sqlOne('SELECT * FROM workers WHERE id = $1', [workerId]);
-  return row ? toPerson(row) : undefined;
-}
-
-export async function getWorkerByEmail(email: string): Promise<WorkerRecord | undefined> {
-  const row = await sqlOne('SELECT * FROM workers WHERE lower(email) = lower($1)', [email.trim()]);
-  return row ? toPerson(row) : undefined;
-}
-
-export async function createWorker(input: { name: string; email: string; passwordHash: string; phone?: string }): Promise<WorkerRecord | undefined> {
-  const name = input.name.trim();
-  const email = input.email.trim().toLowerCase();
-  if (!name || !email || !input.passwordHash) return undefined;
-  // Emails must be unique across admins and workers (both log in with email).
-  if ((await getWorkerByEmail(email)) || (await getAdminByEmail(email))) return undefined;
-
-  const record: WorkerRecord = {
-    id: await nextId('WRK', 'worker', 100),
-    name,
-    email,
-    phone: input.phone?.trim() || undefined,
-    passwordHash: input.passwordHash,
-    active: true,
-    createdAt: nowIso(),
-    updatedAt: nowIso(),
-  };
-  await sql(
-    `INSERT INTO workers (id, name, email, phone, password_hash, active, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-    [record.id, record.name, record.email, record.phone ?? null, record.passwordHash, record.active, record.createdAt, record.updatedAt],
-  );
-  await logActivity({ type: 'worker-created', summary: `נוסף עובד חדש: ${name} (${email})` });
-  return record;
-}
-
-async function updatePerson(
-  table: 'workers' | 'admins',
-  id: string,
-  input: { name?: string; active?: boolean; passwordHash?: string; phone?: string },
-) {
-  const row = await sqlOne(`SELECT * FROM ${table} WHERE id = $1`, [id]);
-  if (!row) return undefined;
-  const record = toPerson(row);
-  if (input.name?.trim()) record.name = input.name.trim();
-  if (input.active !== undefined) record.active = input.active;
-  if (input.passwordHash) record.passwordHash = input.passwordHash;
-  if (input.phone !== undefined) record.phone = input.phone.trim() || undefined;
-  record.updatedAt = nowIso();
-  await sql(`UPDATE ${table} SET name = $2, active = $3, password_hash = $4, phone = $5, updated_at = $6 WHERE id = $1`, [
-    id,
-    record.name,
-    record.active,
-    record.passwordHash,
-    record.phone ?? null,
-    record.updatedAt,
-  ]);
-  // Deactivation or a new password ends every open session of that account.
-  if (input.active === false || input.passwordHash) await revokeAccountSessions(id);
-  return record;
-}
-
-export async function updateWorker(workerId: string, input: { name?: string; active?: boolean; passwordHash?: string; phone?: string }) {
-  const record = await updatePerson('workers', workerId, input);
-  if (record && input.active !== undefined) {
-    await logActivity({ type: 'worker-updated', summary: `עובד ${record.name} ${input.active ? 'הופעל' : 'הושבת'}` });
-  }
-  return record;
-}
-
-// ── Admin accounts (additional admins beyond the root .env admin) ───────────
-
-export async function listAdmins(): Promise<AdminRecord[]> {
-  return (await sql('SELECT * FROM admins ORDER BY created_at DESC, length(id) DESC, id DESC')).map(toPerson);
-}
-
-export async function getAdmin(adminId: string): Promise<AdminRecord | undefined> {
-  const row = await sqlOne('SELECT * FROM admins WHERE id = $1', [adminId]);
-  return row ? toPerson(row) : undefined;
-}
-
-export async function getAdminByEmail(email: string): Promise<AdminRecord | undefined> {
-  const row = await sqlOne('SELECT * FROM admins WHERE lower(email) = lower($1)', [email.trim()]);
-  return row ? toPerson(row) : undefined;
-}
-
-export async function createAdmin(input: { name: string; email: string; passwordHash: string; phone?: string }): Promise<AdminRecord | undefined> {
-  const name = input.name.trim();
-  const email = input.email.trim().toLowerCase();
-  if (!name || !email || !input.passwordHash) return undefined;
-  // Emails must be unique across admins and workers (both log in with email).
-  if ((await getAdminByEmail(email)) || (await getWorkerByEmail(email))) return undefined;
-
-  const record: AdminRecord = {
-    id: await nextId('ADM', 'admin', 10),
-    name,
-    email,
-    phone: input.phone?.trim() || undefined,
-    passwordHash: input.passwordHash,
-    active: true,
-    createdAt: nowIso(),
-    updatedAt: nowIso(),
-  };
-  await sql(
-    `INSERT INTO admins (id, name, email, phone, password_hash, active, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-    [record.id, record.name, record.email, record.phone ?? null, record.passwordHash, record.active, record.createdAt, record.updatedAt],
-  );
-  await logActivity({ type: 'admin-created', summary: `נוסף מנהל נוסף: ${name} (${email})` });
-  return record;
-}
-
-export async function updateAdmin(adminId: string, input: { name?: string; active?: boolean; passwordHash?: string; phone?: string }) {
-  const record = await updatePerson('admins', adminId, input);
-  if (record && input.active !== undefined) {
-    await logActivity({ type: 'admin-updated', summary: `מנהל ${record.name} ${input.active ? 'הופעל' : 'הושבת'}` });
-  }
-  return record;
-}
-
-export interface PersonEntry {
-  id: string;
-  name: string;
-  role: 'admin' | 'worker';
-  active: boolean;
-}
-
-/** Everyone a case can be handled by: the manager ('admin'), extra admins, workers. */
-export async function personDirectory(): Promise<Map<string, PersonEntry>> {
-  const [admins, workers] = await Promise.all([listAdmins(), listWorkers()]);
-  const people: PersonEntry[] = [
-    { id: 'admin', name: 'מנהל', role: 'admin', active: true },
-    ...admins.map((a) => ({ id: a.id, name: a.name, role: 'admin' as const, active: a.active })),
-    ...workers.map((w) => ({ id: w.id, name: w.name, role: 'worker' as const, active: w.active })),
-  ];
-  return new Map(people.map((p) => [p.id, p]));
-}
-
-// ── Password reset codes (email / WhatsApp) ──────────────────────────────────
-
-const RESET_TTL_MS = 15 * 60 * 1000;
-const RESET_COOLDOWN_MS = 60 * 1000;
-const RESET_MAX_ATTEMPTS = 5;
-/** Codes per account per day — stops someone cycling fresh codes to brute-force. */
-const RESET_DAILY_LIMIT = 6;
-
-function hashResetCode(code: string) {
-  return crypto.createHash('sha256').update(`crmye-reset:${code}`).digest('hex');
-}
-
-/**
- * Creates a reset code for the account behind `email` (admin or worker) and
- * delivers it on the requested channel. Always behaves the same externally so
- * emails can't be enumerated.
- */
-export async function requestPasswordReset(email: string, channel: DeliveryChannel) {
-  const normalized = email.trim().toLowerCase();
-  const admin = await getAdminByEmail(normalized);
-  const worker = admin ? undefined : await getWorkerByEmail(normalized);
-  const account = admin ?? worker;
-  if (!account || !account.active) return { ok: true, sent: false } as const;
-  if (!directChannelAvailable(channel)) return { ok: true, sent: false } as const;
-
-  await sql('DELETE FROM password_resets WHERE expires_at < now()');
-  const recent = await sqlOne('SELECT 1 FROM password_resets WHERE email = $1 AND created_at > $2', [
-    normalized,
-    new Date(Date.now() - RESET_COOLDOWN_MS).toISOString(),
-  ]);
-  if (recent) return { ok: true, sent: false } as const;
-  if (!(await consumeRateLimit(`reset-daily:${normalized}`, RESET_DAILY_LIMIT, 24 * 60 * 60))) {
-    return { ok: true, sent: false } as const;
-  }
-
-  const code = String(crypto.randomInt(100000, 1000000));
-  await transaction(async () => {
-    // One active reset per email.
-    await sql('DELETE FROM password_resets WHERE email = $1', [normalized]);
-    await sql(
-      `INSERT INTO password_resets (id, account_type, account_id, email, code_hash, expires_at, attempts, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, 0, $7)`,
-      [
-        crypto.randomUUID(),
-        admin ? 'admin' : 'worker',
-        account.id,
-        normalized,
-        hashResetCode(code),
-        new Date(Date.now() + RESET_TTL_MS).toISOString(),
-        nowIso(),
-      ],
-    );
-  });
-
-  await logActivity({ type: 'password-reset-requested', summary: `התבקש איפוס סיסמה עבור ${account.name}` });
-
-  const { businessName } = await getConfig();
-  await deliver({
-    channel,
-    to: { email: account.email, phone: account.phone },
-    message: passwordResetMessage({ businessName, name: account.name, code, minutes: 15 }),
-    relatedId: account.id,
-  });
-  return { ok: true, sent: true } as const;
-}
-
-/** Verifies the code and sets the new password hash. Consumes the reset on success. */
-export async function completePasswordReset(email: string, code: string, newPasswordHash: string) {
-  const normalized = email.trim().toLowerCase();
-  const outcome = await transaction(async () => {
-    const record = await sqlOne('SELECT * FROM password_resets WHERE email = $1 AND expires_at > now() FOR UPDATE', [normalized]);
-    if (!record) return { ok: false, error: 'קוד לא תקין או שפג תוקפו' } as const;
-
-    if (record.attempts >= RESET_MAX_ATTEMPTS) {
-      await sql('DELETE FROM password_resets WHERE id = $1', [record.id]);
-      return { ok: false, error: 'יותר מדי ניסיונות — בקש קוד חדש' } as const;
-    }
-
-    const given = Buffer.from(hashResetCode(code.trim()));
-    const expected = Buffer.from(String(record.code_hash));
-    if (given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) {
-      await sql('UPDATE password_resets SET attempts = attempts + 1 WHERE id = $1', [record.id]);
-      return { ok: false, error: 'קוד שגוי' } as const;
-    }
-
-    await sql('DELETE FROM password_resets WHERE id = $1', [record.id]);
-    return { ok: true, accountType: record.account_type as 'admin' | 'worker', accountId: record.account_id as string } as const;
-  });
-  if (!outcome.ok) return outcome;
-
-  const updated =
-    outcome.accountType === 'admin'
-      ? await updateAdmin(outcome.accountId, { passwordHash: newPasswordHash })
-      : await updateWorker(outcome.accountId, { passwordHash: newPasswordHash });
-  if (!updated) return { ok: false, error: 'החשבון לא נמצא' } as const;
-
-  await logActivity({ type: 'password-reset-completed', summary: `אופסה סיסמה עבור ${updated.name}` });
-  return { ok: true } as const;
-}
-
 // ── Session-based visibility ─────────────────────────────────────────────────
 
 export type Viewer = { role: 'admin' } | { role: 'worker'; workerId: string };
@@ -1536,6 +1279,9 @@ export function toTask(row: Row): TaskRecord {
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
     completedAt: isoOpt(row.completed_at),
+    watchKind: opt(row.watch_kind) as TaskRecord['watchKind'],
+    watchRef: opt(row.watch_ref),
+    resolvedReason: opt(row.resolved_reason),
   };
 }
 
@@ -1560,15 +1306,6 @@ export async function listVisibleTasks(viewer: Viewer) {
   return (await sql(`SELECT * FROM tasks WHERE assignee_id = $1 OR created_by = $1 ${TASK_ORDER}`, [viewer.workerId])).map(toTask);
 }
 
-/** Contact details for a task assignee ('admin', an extra admin ADM-x, or a worker id). */
-export async function assigneeContact(assigneeId: string) {
-  if (assigneeId === 'admin') {
-    return { id: 'admin', name: 'מנהל', email: env.adminEmail, phone: env.adminPhone || '' };
-  }
-  const person = assigneeId.startsWith('ADM-') ? await getAdmin(assigneeId) : await getWorker(assigneeId);
-  if (!person) return { id: assigneeId, name: assigneeId, email: '', phone: '' };
-  return { id: person.id, name: person.name, email: person.email, phone: person.phone || '' };
-}
 
 export interface CreateTaskInput {
   title: string;
@@ -1581,6 +1318,8 @@ export interface CreateTaskInput {
   clientId?: string;
   caseId?: string;
   createdBy: string;
+  watchKind?: TaskRecord['watchKind'];
+  watchRef?: string;
 }
 
 export async function createTask(input: CreateTaskInput): Promise<TaskRecord | undefined> {
@@ -1602,12 +1341,14 @@ export async function createTask(input: CreateTaskInput): Promise<TaskRecord | u
     createdBy: input.createdBy,
     createdAt: nowIso(),
     updatedAt: nowIso(),
+    watchKind: input.watchKind,
+    watchRef: input.watchKind ? input.watchRef : undefined,
   };
 
   await sql(
     `INSERT INTO tasks (id, title, notes, due_at, remind_at, reminder_channels, priority, assignee_id, client_id,
-                        case_id, status, created_by, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+                        case_id, status, created_by, created_at, updated_at, watch_kind, watch_ref)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
     [
       record.id,
       record.title,
@@ -1623,6 +1364,8 @@ export async function createTask(input: CreateTaskInput): Promise<TaskRecord | u
       record.createdBy,
       record.createdAt,
       record.updatedAt,
+      nul(record.watchKind),
+      nul(record.watchRef),
     ],
   );
 
@@ -1693,6 +1436,7 @@ export async function updateTask(taskId: string, input: UpdateTaskInput) {
     if (input.status && input.status !== record.status) {
       record.status = input.status;
       record.completedAt = input.status === 'done' ? nowIso() : undefined;
+      record.resolvedReason = undefined;
       statusChanged = true;
     }
     record.updatedAt = nowIso();
@@ -1700,7 +1444,8 @@ export async function updateTask(taskId: string, input: UpdateTaskInput) {
     await sql(
       `UPDATE tasks SET title = $2, notes = $3, due_at = $4, remind_at = $5, reminder_channels = $6,
               reminder_sent_at = $7, priority = $8, assignee_id = $9, status = $10, updated_at = $11, completed_at = $12,
-              reminder_attempts = CASE WHEN $13 THEN 0 ELSE reminder_attempts END
+              reminder_attempts = CASE WHEN $13 THEN 0 ELSE reminder_attempts END,
+              resolved_reason = CASE WHEN $14 THEN NULL ELSE resolved_reason END
         WHERE id = $1`,
       [
         taskId,
@@ -1716,6 +1461,7 @@ export async function updateTask(taskId: string, input: UpdateTaskInput) {
         record.updatedAt,
         record.completedAt ?? null,
         rearmed,
+        statusChanged,
       ],
     );
     return { record, statusChanged };

@@ -12,9 +12,9 @@ import {
   listClientDocuments,
   listClientPayments,
   listPayments,
-  personDirectory,
   updateClient,
 } from '@/lib/store';
+import { personDirectory } from '@/lib/users';
 import { getViewer } from '@/lib/viewer';
 
 type Params = { params: Promise<{ clientId: string }> };
@@ -39,7 +39,7 @@ export async function GET(_request: NextRequest, { params }: Params) {
       missingItems: countMissingItems(c),
       finance: getCaseFinance(c, payments),
       assignedToName: nameOf(c.assignedTo),
-      openedByName: c.openedBy === 'admin' ? '' : nameOf(c.openedBy),
+      openedByName: nameOf(c.openedBy),
       handlerId: caseHandlerId(c),
     }));
 

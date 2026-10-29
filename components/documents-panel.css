@@ -1,0 +1,38 @@
+/* Documents panel (client folder and case page). Built on the shared
+   .dropzone / .doc-row / .selection-bar rules in app/globals.css. */
+
+.docs-panel .dropzone { padding: 16px 18px; }
+
+.docs-panel .staged {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  animation: pop-in var(--fast) var(--ease) both;
+}
+
+.docs-panel .staged .doc-row { border-bottom: 0; padding: 4px 0; }
+
+.docs-panel .doc-row { border-radius: var(--radius-s); transition: background var(--fast) var(--ease); }
+.docs-panel .doc-row:hover { background: var(--surface-2); }
+.docs-panel .doc-row.picked { background: var(--accent-soft); }
+
+.docs-panel .doc-check { width: 16px; height: 16px; accent-color: var(--accent); flex-shrink: 0; }
+
+.doc-title {
+  display: block;
+  font-weight: 600;
+  color: var(--ink);
+  transition: color var(--fast) var(--ease);
+}
+.doc-title:hover { color: var(--accent); }
+
+/* Row actions stay quiet until the row is in play (always visible on touch). */
+@media (hover: hover) {
+  .docs-panel .doc-actions { opacity: 0.55; transition: opacity var(--fast) var(--ease); }
+  .docs-panel .doc-row:hover .doc-actions,
+  .docs-panel .doc-row:focus-within .doc-actions { opacity: 1; }
+}

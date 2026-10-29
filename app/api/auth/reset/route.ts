@@ -4,7 +4,7 @@ import bcrypt from 'bcryptjs';
 import { MIN_PASSWORD_LENGTH, PASSWORD_HASH_ROUNDS } from '@/lib/admin-auth';
 import { consumeRateLimit } from '@/lib/rate-limit';
 import { clientIp } from '@/lib/request-ip';
-import { completePasswordReset } from '@/lib/store';
+import { completePasswordReset } from '@/lib/users';
 
 /** Public: completes a password reset with the emailed / WhatsApp code. */
 export async function POST(request: NextRequest) {

@@ -44,6 +44,10 @@ ADMIN_SESSION_SECRET=<openssl rand -hex 32>
 ```
 (את `APP_BASE_URL` ו-`DATABASE_URL` Docker ממלא לבד.)
 
+> **חשבון הבעלים:** בהפעלה הראשונה נוצר חשבון "בעלים" מ-`ADMIN_EMAIL` ו-`ADMIN_PASSWORD`, ונכנסים איתם
+> (אימייל + סיסמה, כמו כל עובד). אחר כך הסיסמה מנוהלת בתוך המערכת (**החשבון שלי**), ושאר הצוות —
+> מנהלים ועובדים — נוסף בדף **צוות והרשאות**. רק הבעלים יכול להוסיף מנהלים; מנהל מנהל עובדים בלבד.
+
 > **סיסמה מוצפנת (bcrypt) ב-Docker:** ב-`.env` של Docker הסימן `$` מתפרש כמשתנה, לכן
 > `ADMIN_PASSWORD_HASH` חייב להיות בגרשיים בודדים: `ADMIN_PASSWORD_HASH='$2a$12$...'`
 
@@ -246,7 +250,8 @@ cd ~/htdocs/<הדומיין> && git pull && npm ci && npm run build && pm2 resta
 | האתר לא עולה | `docker compose logs app` / `pm2 logs crmye` — הודעת "refuses to start" מפרטת מה חסר |
 | 502 | האפליקציה לא מאזינה: האם `DATABASE_URL` נכון ו-PostgreSQL רץ? `curl http://127.0.0.1:3006/api/health` |
 | "יותר מדי ניסיונות כניסה" | נעילה זמנית של 15 דקות אחרי 8 סיסמאות שגויות לחשבון |
-| כולם התנתקו אחרי שינוי `ADMIN_PASSWORD` | צפוי — החלפת סיסמת המנהל מנתקת את כל חיבורי המנהל הראשי |
+| שינוי `ADMIN_PASSWORD` לא משנה כלום | צפוי — הוא משמש רק ליצירת חשבון הבעלים בהפעלה הראשונה. מאז הסיסמה נקבעת בדף **החשבון שלי** |
+| הבעלים שכח סיסמה ואין גישה לאימייל/וואטסאפ | על השרת: `npm run owner:reset` (ב-Docker: `docker compose exec app node scripts/reset-owner-password.mjs`) — מדפיס סיסמה זמנית אחת |
 | העלאת קובץ נכשלת (413) | nginx: `client_max_body_size 30M` (סעיף ב2) |
 | אימייל / וואטסאפ לא נשלחים | דף **חיבורים** → "הודעות אחרונות" מציג את סיבת הכשל |
 | נעילת כניסה בכל ה-IP-ים יחד | `CLIENT_IP_HEADER` לא תואם לשרת: CloudPanel/nginx → `x-real-ip`, Caddy/Docker → `x-forwarded-for` |

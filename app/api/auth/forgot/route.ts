@@ -3,7 +3,7 @@ import type { NextRequest } from 'next/server';
 import { directChannelAvailable } from '@/lib/notify';
 import { consumeRateLimit } from '@/lib/rate-limit';
 import { clientIp } from '@/lib/request-ip';
-import { requestPasswordReset } from '@/lib/store';
+import { requestPasswordReset } from '@/lib/users';
 
 /**
  * Public: requests a password-reset code by email (Resend) or WhatsApp (Meta).

@@ -336,6 +336,45 @@ export interface TaskRecord {
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
+  /** What gap this reminder watches; it closes itself once the gap is filled. */
+  watchKind?: TaskWatchKind;
+  /** checklist-item: the item code · client-details: comma-separated field names. */
+  watchRef?: string;
+  /** Set when the reminder closed itself: why (e.g. "המסמך התקבל"). */
+  resolvedReason?: string;
+}
+
+export type TaskWatchKind = 'checklist-item' | 'case-documents' | 'case-payment' | 'client-details';
+
+export const TASK_WATCH_KINDS: TaskWatchKind[] = ['checklist-item', 'case-documents', 'case-payment', 'client-details'];
+
+/** Client details whose absence can be watched. */
+export const CLIENT_DETAIL_LABELS = {
+  phone: 'טלפון',
+  idNumber: 'תעודת זהות',
+  email: 'אימייל',
+  address: 'כתובת',
+  city: 'עיר',
+} as const;
+
+export type ClientDetailField = keyof typeof CLIENT_DETAIL_LABELS;
+
+export function missingClientDetails(client: Partial<Record<ClientDetailField, string | undefined>>): ClientDetailField[] {
+  return (Object.keys(CLIENT_DETAIL_LABELS) as ClientDetailField[]).filter((f) => !client[f]?.trim());
+}
+
+/** "Closes by itself when …" — shown on the reminder. */
+export function watchHint(kind: TaskWatchKind) {
+  switch (kind) {
+    case 'checklist-item':
+      return 'נסגרת מעצמה כשהמסמך מתקבל';
+    case 'case-documents':
+      return 'נסגרת מעצמה כשכל המסמכים מתקבלים';
+    case 'case-payment':
+      return 'נסגרת מעצמה כשהתשלום מתקבל';
+    case 'client-details':
+      return 'נסגרת מעצמה כשהפרטים מושלמים';
+  }
 }
 
 // ── Team chat ────────────────────────────────────────────────────────────────

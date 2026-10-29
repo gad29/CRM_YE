@@ -1,0 +1,126 @@
+/* Account, team and activity screens. Builds on globals.css tokens. */
+
+/* A temporary password, shown once: big, monospaced, easy to read aloud. */
+.temp-pass {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border-radius: var(--radius);
+  border: 1.5px dashed var(--line-strong);
+  background: var(--surface-2);
+}
+.temp-pass-value {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-family: var(--font-mono);
+  font-size: 20px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  direction: ltr;
+  color: var(--ink);
+}
+
+/* Devices and sign-in rows. */
+.sec-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 2px;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+}
+.sec-row:last-child { border-bottom: 0; }
+.sec-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  flex-shrink: 0;
+}
+.sec-icon.ok { background: var(--green-soft); color: var(--green); }
+.sec-icon.bad { background: var(--red-soft); color: var(--red); }
+.sec-main { min-width: 0; flex: 1; display: grid; gap: 1px; }
+.sec-title { font-weight: 600; }
+.sec-sub { font-size: 12.5px; color: var(--muted); }
+
+/* Team table. */
+.team-row td:first-child { width: 44%; }
+.team-person { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.team-person .avatar.off { background: var(--surface-2); color: var(--muted); }
+.team-row.inactive .list-title { color: var(--muted); text-decoration: line-through; text-decoration-thickness: 1px; }
+
+/* The owner's row carries a thin rule — there is only ever one. */
+.team-row.owner td:first-child { box-shadow: inset -3px 0 0 var(--accent); }
+
+/* Drawer sections. */
+.drawer-section { display: grid; gap: 10px; }
+.drawer-section + .drawer-section { padding-top: 16px; border-top: 1px solid var(--line); }
+.drawer-section-title { font-size: 13px; font-weight: 700; color: var(--muted); }
+
+/* Activity log: a day header, then entries. */
+.log-day {
+  position: sticky;
+  top: 64px;
+  z-index: 1;
+  padding: 14px 4px 6px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--muted);
+  background: var(--surface);
+}
+.log-row {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: baseline;
+  padding: 9px 4px;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+}
+.log-row:last-child { border-bottom: 0; }
+.log-time { font-family: var(--font-mono); font-size: 12.5px; color: var(--muted); direction: ltr; text-align: end; }
+.log-links { display: flex; gap: 8px; font-size: 13px; white-space: nowrap; }
+
+/* The account page's forced password change. */
+.must-change {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 16px 18px;
+  border-radius: var(--radius-l);
+  background: var(--amber-soft);
+  border: 1px solid color-mix(in srgb, var(--amber) 35%, transparent);
+  margin-bottom: 18px;
+}
+.must-change strong { display: block; margin-bottom: 2px; }
+
+/* Forgot-password: the code input. */
+.code-input {
+  text-align: center !important;
+  letter-spacing: 0.5em;
+  font-family: var(--font-mono);
+  font-size: 22px !important;
+  height: 52px !important;
+}
+
+.done-mark {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--green-soft);
+  color: var(--green);
+  animation: modal-in var(--base) var(--ease) both;
+}
+
+@media (max-width: 640px) {
+  .log-row { grid-template-columns: 44px minmax(0, 1fr); }
+  .log-links { grid-column: 2; }
+  .team-hide-sm { display: none; }
+}

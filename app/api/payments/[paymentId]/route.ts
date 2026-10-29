@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { PAYMENT_METHOD_LABELS, type PaymentMethod } from '@/lib/domain';
-import { deletePayment, updatePayment } from '@/lib/store';
+import { deletePayment, getConfig, updatePayment } from '@/lib/store';
 import { requireAdmin } from '@/lib/viewer';
 
 type Params = { params: Promise<{ paymentId: string }> };
@@ -21,7 +21,7 @@ export async function PATCH(request: NextRequest, { params }: Params) {
   if (body.amount !== undefined && (!Number.isFinite(body.amount) || body.amount <= 0)) {
     return NextResponse.json({ ok: false, error: 'סכום חייב להיות חיובי (למחיקת תשלום השתמש בכפתור המחיקה)' }, { status: 400 });
   }
-  if (body.method && !(body.method in PAYMENT_METHOD_LABELS)) {
+  if (body.method && !(body.method in PAYMENT_METHOD_LABELS) && !(await getConfig()).paymentMethods.some((m) => m.value === body.method)) {
     return NextResponse.json({ ok: false, error: 'אמצעי תשלום לא מוכר' }, { status: 400 });
   }
 

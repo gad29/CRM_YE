@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { PAYMENT_METHOD_LABELS, type PaymentMethod } from '@/lib/domain';
-import { createPayment, listPayments } from '@/lib/store';
+import { createPayment, getConfig, listPayments } from '@/lib/store';
 import { requireAdmin } from '@/lib/viewer';
 
 export async function GET() {
@@ -23,7 +23,9 @@ export async function POST(request: NextRequest) {
   if (!body.clientId || !body.amount || body.amount <= 0) {
     return NextResponse.json({ ok: false, error: 'לקוח וסכום חיובי הם שדות חובה' }, { status: 400 });
   }
-  const method: PaymentMethod = body.method && body.method in PAYMENT_METHOD_LABELS ? body.method : 'other';
+  // Built-in methods plus any added in Settings.
+  const known = new Set([...Object.keys(PAYMENT_METHOD_LABELS), ...(await getConfig()).paymentMethods.map((m) => m.value)]);
+  const method = (body.method && known.has(body.method) ? body.method : 'other') as PaymentMethod;
 
   const record = await createPayment({
     clientId: body.clientId,

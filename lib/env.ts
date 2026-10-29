@@ -110,7 +110,6 @@ export function isProductionLike() {
 export function productionConfigProblems(): string[] {
   const problems: string[] = [];
   if (!process.env.DATABASE_URL) problems.push('DATABASE_URL is not set');
-  if (!hasAdminPassword()) problems.push('ADMIN_PASSWORD or ADMIN_PASSWORD_HASH must be set to a real value');
   const secret = env.adminSessionSecret || '';
   if (secret.length < 32 || looksLikePlaceholder(secret)) {
     problems.push('ADMIN_SESSION_SECRET must be a random string of at least 32 characters (openssl rand -hex 32)');

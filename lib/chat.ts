@@ -16,12 +16,12 @@ import { afterCommit, iso, isoOpt, opt, sql, sqlOne, transaction } from '@/lib/d
 import { env } from '@/lib/env';
 import { chatMessageNotice } from '@/lib/messages';
 import { deliver, directChannelAvailable } from '@/lib/notify';
-import { createTask, dataRoot, getConfig, listAdmins, listWorkers, nextId, safeSegment } from '@/lib/store';
+import { createTask, dataRoot, getConfig, nextId, safeSegment } from '@/lib/store';
+import { isAdminRole, listUsers } from '@/lib/users';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>;
 
-const ROOT_ADMIN_ID = 'admin';
 
 function nowIso() {
   return new Date().toISOString();
@@ -35,20 +35,10 @@ function channelFolder(channelId: string) {
 
 /** Everyone who can take part in the chat: the root admin, extra admins, workers. */
 export async function listChatMembers(): Promise<ChatMember[]> {
-  const rootAdmin: ChatMember = {
-    id: ROOT_ADMIN_ID,
-    name: 'מנהל ראשי',
-    role: 'admin',
-    email: env.adminEmail,
-    phone: env.adminPhone || undefined,
-    active: true,
-  };
-  const [admins, workers] = await Promise.all([listAdmins(), listWorkers()]);
-  return [
-    rootAdmin,
-    ...admins.map((a): ChatMember => ({ id: a.id, name: a.name, role: 'admin', email: a.email, phone: a.phone, active: a.active })),
-    ...workers.map((w): ChatMember => ({ id: w.id, name: w.name, role: 'worker', email: w.email, phone: w.phone, active: w.active })),
-  ];
+  // Everyone with an account, the owner included ('admin' — the id chat history uses).
+  return (await listUsers()).map(
+    (u): ChatMember => ({ id: u.id, name: u.name, role: isAdminRole(u.role) ? 'admin' : 'worker', email: u.email, phone: u.phone, active: u.active }),
+  );
 }
 
 export async function getChatMember(id: string) {

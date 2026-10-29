@@ -1,10 +1,13 @@
 'use client';
 
 import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import { Suspense, useEffect, useMemo, useState } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
-import { CASE_KIND_LABELS, type CaseKind, type OperatingCompany } from '@/lib/domain';
-import { useConfig } from '@/components/config-provider';
+import { useNewFlow } from '@/components/app-shell';
+import { Empty, PageHead, Segmented, shekel } from '@/components/ui/bits';
+import { IconChevronLeft, IconClients, IconFlag, IconPlus, IconSearch, IconX } from '@/components/ui/icons';
+import { letters } from './letters';
+import '../styles/lists.css';
 
 type ClientRow = {
   id: string;
@@ -19,245 +22,232 @@ type ClientRow = {
   hasTrouble?: boolean;
   outstandingBalance: number;
   createdAt: string;
+  updatedAt?: string;
 };
 
-function shekel(amount: number) {
-  return `₪${amount.toLocaleString('he-IL')}`;
-}
+type Chip = 'all' | 'active' | 'missing' | 'balance' | 'flagged' | 'nocase' | 'dupes';
 
-function NewClientForm({ onCreated, onClose }: { onCreated: (caseId: string | null, clientId: string) => void; onClose: () => void }) {
-  const config = useConfig();
-  const [form, setForm] = useState({ fullName: '', phone: '', idNumber: '', email: '', city: '', address: '', notes: '' });
-  const [caseForm, setCaseForm] = useState({
-    title: config.defaultCaseTitle,
-    // No default — the company must be chosen explicitly.
-    company: '' as OperatingCompany | '',
-    caseKind: 'new' as CaseKind,
-    fee: config.defaultFee ? String(config.defaultFee) : '',
-  });
-  const [openCase, setOpenCase] = useState(config.autoCreateCaseOnClient);
-  const [seedChecklist, setSeedChecklist] = useState(config.seedChecklistByDefault);
-  const [error, setError] = useState('');
-  const [saving, setSaving] = useState(false);
+const CHIPS: { id: Chip; label: string }[] = [
+  { id: 'all', label: 'כולם' },
+  { id: 'active', label: 'עם תיק פעיל' },
+  { id: 'missing', label: 'חסרים מסמכים' },
+  { id: 'balance', label: 'יתרה לתשלום' },
+  { id: 'flagged', label: 'מסומנים' },
+  { id: 'nocase', label: 'בלי תיק פעיל' },
+  { id: 'dupes', label: 'כפילויות אפשריות' },
+];
 
-  function set<K extends keyof typeof form>(key: K, value: string) {
-    setForm((prev) => ({ ...prev, [key]: value }));
-  }
+const digits = (v?: string) => (v || '').replace(/\D/g, '');
 
-  async function submit(event: React.FormEvent) {
-    event.preventDefault();
-    setError('');
-    setSaving(true);
-    try {
-      const res = await fetch('/api/clients', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...form,
-          createCase: openCase,
-          case: openCase
-            ? {
-                title: caseForm.title,
-                company: caseForm.company,
-                caseKind: caseForm.caseKind,
-                fee: caseForm.fee ? Number(caseForm.fee) : 0,
-                seedChecklist,
-              }
-            : undefined,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.ok) {
-        setError(data.error || 'שמירת הלקוח נכשלה');
-        return;
-      }
-      onCreated(data.data.case?.id ?? null, data.data.client.id);
-    } catch {
-      setError('שגיאת תקשורת');
-    } finally {
-      setSaving(false);
-    }
-  }
 
-  return (
-    <div className="card" style={{ marginBottom: 20 }}>
-      <div className="section-heading">
-        <h3 style={{ margin: 0 }}>לקוח חדש</h3>
-        <button type="button" className="doc-action-btn" onClick={onClose}>✕ סגור</button>
-      </div>
-      <form onSubmit={submit}>
-        <div className="form-grid cols-2">
-          <div className="field">
-            <label>שם מלא *</label>
-            <input value={form.fullName} onChange={(e) => set('fullName', e.target.value)} required />
-          </div>
-          <div className="field">
-            <label>טלפון *</label>
-            <input value={form.phone} onChange={(e) => set('phone', e.target.value)} required dir="ltr" style={{ textAlign: 'right' }} />
-          </div>
-          <div className="field">
-            <label>תעודת זהות</label>
-            <input value={form.idNumber} onChange={(e) => set('idNumber', e.target.value)} dir="ltr" style={{ textAlign: 'right' }} />
-          </div>
-          <div className="field">
-            <label>אימייל</label>
-            <input type="email" value={form.email} onChange={(e) => set('email', e.target.value)} dir="ltr" style={{ textAlign: 'right' }} />
-          </div>
-          <div className="field">
-            <label>עיר</label>
-            <input value={form.city} onChange={(e) => set('city', e.target.value)} />
-          </div>
-          <div className="field">
-            <label>כתובת</label>
-            <input value={form.address} onChange={(e) => set('address', e.target.value)} />
-          </div>
-        </div>
-        <div className="field">
-          <label>הערות</label>
-          <textarea value={form.notes} onChange={(e) => set('notes', e.target.value)} rows={2} />
-        </div>
-
-        <div className="section-heading" style={{ marginTop: 6 }}>
-          <label className="choice-card" style={{ display: 'inline-flex', width: 'auto', padding: '8px 14px' }}>
-            <input type="checkbox" checked={openCase} onChange={(e) => setOpenCase(e.target.checked)} />
-            <span>פתח תיק אוטומטית ללקוח</span>
-          </label>
-          {openCase && (
-            <label className="choice-card" style={{ display: 'inline-flex', width: 'auto', padding: '8px 14px' }}>
-              <input type="checkbox" checked={seedChecklist} onChange={(e) => setSeedChecklist(e.target.checked)} />
-              <span>טען רשימת מסמכים נדרשים</span>
-            </label>
-          )}
-        </div>
-
-        {openCase && (
-        <div className="form-grid cols-2">
-          <div className="field">
-            <label>נושא התיק</label>
-            <input value={caseForm.title} onChange={(e) => setCaseForm({ ...caseForm, title: e.target.value })} />
-          </div>
-          <div className="field">
-            <label>חברה מטפלת *</label>
-            <select
-              value={caseForm.company}
-              onChange={(e) => setCaseForm({ ...caseForm, company: e.target.value as OperatingCompany | '' })}
-              required
-            >
-              <option value="" disabled>בחרו חברה…</option>
-              {config.companies.map((c) => (
-                <option key={c.value} value={c.value}>{c.label}</option>
-              ))}
-            </select>
-          </div>
-          <div className="field">
-            <label>סוג התיק</label>
-            <div className="language-switch">
-              {(Object.entries(CASE_KIND_LABELS) as [CaseKind, string][]).map(([value, label]) => (
-                <button
-                  key={value}
-                  type="button"
-                  className={`language-option ${caseForm.caseKind === value ? 'active' : ''}`}
-                  onClick={() => setCaseForm({ ...caseForm, caseKind: value })}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="field">
-            <label>שכר טרחה (₪)</label>
-            <input type="number" min="0" value={caseForm.fee} onChange={(e) => setCaseForm({ ...caseForm, fee: e.target.value })} />
-          </div>
-        </div>
-        )}
-
-        {error && <p className="form-error">{error}</p>}
-        <button className="button" type="submit" disabled={saving}>
-          {saving ? 'שומר…' : openCase ? 'שמור לקוח ופתח תיק' : 'שמור לקוח'}
-        </button>
-      </form>
-    </div>
-  );
-}
-
-function ClientsPageInner() {
-  const router = useRouter();
-  const searchParams = useSearchParams();
+function ClientsInner() {
+  const params = useSearchParams();
+  const openWizard = useNewFlow();
   const [clients, setClients] = useState<ClientRow[]>([]);
   const [loading, setLoading] = useState(true);
-  const [query, setQuery] = useState('');
-  const [showNew, setShowNew] = useState(searchParams.get('new') === '1');
+  const [failed, setFailed] = useState(false);
+  const [query, setQuery] = useState(params.get('q') || '');
+  const [chip, setChip] = useState<Chip>(() => (CHIPS.some((c) => c.id === params.get('show')) ? (params.get('show') as Chip) : 'all'));
+  const [sort, setSort] = useState<'name' | 'recent'>('recent');
 
   useEffect(() => {
     fetch('/api/clients')
       .then((r) => r.json())
       .then((d) => {
         if (d.ok) setClients(d.data);
+        else setFailed(true);
       })
-      .catch(() => null)
+      .catch(() => setFailed(true))
       .finally(() => setLoading(false));
   }, []);
 
-  const filtered = useMemo(() => {
+  // Old links: /clients?new=1 open the new-client flow.
+  useEffect(() => {
+    if (params.get('new') === '1') openWizard({ mode: 'client' });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Two cards for one person (same phone or ID number) — flagged so they can be merged by hand.
+  const dupes = useMemo(() => {
+    const seen = new Map<string, string[]>();
+    for (const c of clients) {
+      for (const key of [digits(c.phone).slice(-9), digits(c.idNumber).replace(/^0+/, '')]) {
+        if (key.length < 7) continue;
+        seen.set(key, [...(seen.get(key) ?? []), c.id]);
+      }
+    }
+    const ids = new Set<string>();
+    for (const list of seen.values()) if (list.length > 1) list.forEach((id) => ids.add(id));
+    return ids;
+  }, [clients]);
+
+  const matchesChip = (c: ClientRow, id: Chip) => {
+    switch (id) {
+      case 'active':
+        return c.openCaseCount > 0;
+      case 'missing':
+        return c.missingItems > 0;
+      case 'balance':
+        return c.outstandingBalance > 0;
+      case 'flagged':
+        return Boolean(c.hasTrouble);
+      case 'nocase':
+        return c.openCaseCount === 0;
+      case 'dupes':
+        return dupes.has(c.id);
+      default:
+        return true;
+    }
+  };
+
+  const searched = useMemo(() => {
     const q = query.trim().toLowerCase();
+    const qDigits = digits(q);
     if (!q) return clients;
     return clients.filter(
       (c) =>
         c.fullName.toLowerCase().includes(q) ||
-        c.phone.includes(q) ||
-        (c.idNumber || '').includes(q) ||
-        (c.email || '').toLowerCase().includes(q),
+        (qDigits.length >= 3 && (digits(c.phone).includes(qDigits) || digits(c.idNumber).includes(qDigits))) ||
+        (c.email || '').toLowerCase().includes(q) ||
+        (c.city || '').toLowerCase().includes(q) ||
+        c.id.toLowerCase() === q,
     );
   }, [clients, query]);
 
+  const shown = useMemo(() => {
+    const list = searched.filter((c) => matchesChip(c, chip));
+    return list.sort((a, b) =>
+      sort === 'name'
+        ? a.fullName.localeCompare(b.fullName, 'he')
+        : (b.updatedAt || b.createdAt).localeCompare(a.updatedAt || a.createdAt),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searched, chip, sort, dupes]);
+
+  const chips = CHIPS.filter((c) => c.id !== 'dupes' || dupes.size > 0);
+
   return (
     <div>
-      <div className="hero">
-        <div>
-          <p className="eyebrow">לקוחות</p>
-          <h1 style={{ margin: '6px 0 4px' }}>כל הלקוחות</h1>
-          <p className="muted" style={{ margin: 0 }}>{clients.length} לקוחות במערכת</p>
-        </div>
-        <div className="hero-actions">
-          <button className="button" type="button" onClick={() => setShowNew(true)}>+ לקוח חדש</button>
-        </div>
-      </div>
+      <PageHead
+        eyebrow="לקוחות"
+        title="הלקוחות"
+        sub={loading ? 'טוען…' : `${clients.length} לקוחות · ${clients.filter((c) => c.openCaseCount > 0).length} עם תיק פעיל`}
+        actions={
+          <button type="button" className="button" onClick={() => openWizard({ mode: 'client' })}>
+            <IconPlus size={16} /> לקוח חדש
+          </button>
+        }
+      />
 
-      {showNew && (
-        <NewClientForm
-          onClose={() => setShowNew(false)}
-          onCreated={(caseId, clientId) => router.push((caseId ? `/cases/${caseId}` : `/clients/${clientId}`) as never)}
-        />
-      )}
-
-      <div className="field" style={{ maxWidth: 420 }}>
-        <input placeholder="חיפוש לפי שם, טלפון, ת.ז או אימייל…" value={query} onChange={(e) => setQuery(e.target.value)} />
+      <div className="filters">
+        <div className="filters-row">
+          <label className="search filters-search">
+            <IconSearch size={16} />
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="שם, טלפון, תעודת זהות, אימייל או עיר"
+              aria-label="חיפוש לקוחות"
+              autoFocus
+            />
+          </label>
+          <Segmented
+            label="מיון"
+            value={sort}
+            onChange={setSort}
+            options={[
+              { value: 'recent', label: 'עודכנו לאחרונה' },
+              { value: 'name', label: 'א–ת' },
+            ]}
+          />
+        </div>
+        <div className="filters-row scroll" role="group" aria-label="סינון לקוחות">
+          {chips.map((c) => (
+            <button
+              key={c.id}
+              type="button"
+              className={`filter-chip ${chip === c.id ? 'on' : ''}`}
+              aria-pressed={chip === c.id}
+              onClick={() => setChip(c.id)}
+            >
+              {c.label}
+              {!loading && <span className="n">{searched.filter((x) => matchesChip(x, c.id)).length}</span>}
+            </button>
+          ))}
+        </div>
       </div>
 
       {loading ? (
-        <div className="card muted" style={{ padding: 24 }}>טוען לקוחות…</div>
-      ) : filtered.length === 0 ? (
-        <div className="card muted" style={{ padding: 24 }}>
-          {clients.length === 0 ? 'אין עדיין לקוחות. הוסף את הלקוח הראשון כדי להתחיל.' : 'לא נמצאו תוצאות לחיפוש.'}
+        <div className="card" aria-busy="true">
+          {[0, 1, 2, 3, 4].map((i) => (
+            <div key={i} className="skeleton" style={{ height: 44, margin: '8px 0', borderRadius: 10 }} />
+          ))}
         </div>
+      ) : failed ? (
+        <Empty icon={<IconClients size={30} />} title="הרשימה לא נטענה">
+          בדקו את החיבור לאינטרנט ורעננו את הדף.
+        </Empty>
+      ) : clients.length === 0 ? (
+        <Empty
+          icon={<IconClients size={30} />}
+          title="עוד אין לקוחות"
+          action={
+            <button type="button" className="button" onClick={() => openWizard({ mode: 'client' })}>
+              <IconPlus size={16} /> הלקוח הראשון
+            </button>
+          }
+        >
+          פרטי הלקוח, החברה המטפלת ורשימת המסמכים — בשלושה צעדים, והתיק נפתח.
+        </Empty>
+      ) : shown.length === 0 ? (
+        <Empty icon={<IconSearch size={28} />} title="לא נמצאו לקוחות">
+          {query ? (
+            <span>
+              אין התאמה ל״{query}״.{' '}
+              <button type="button" className="text-link" onClick={() => { setQuery(''); setChip('all'); }}>
+                ניקוי החיפוש
+              </button>
+            </span>
+          ) : (
+            'אין לקוחות בסינון הזה.'
+          )}
+        </Empty>
       ) : (
-        <div className="office-case-list">
-          {filtered.map((client) => (
-            <Link key={client.id} className={`case-list-item ${client.hasTrouble ? 'case-trouble' : ''}`} href={`/clients/${client.id}` as never}>
-              <span className="cli-name">
-                {client.hasTrouble && <span title="יש תיק שדורש טיפול">🚩 </span>}
-                {client.fullName}
+        <div className="card client-list">
+          {shown.map((c) => (
+            <Link key={c.id} href={`/clients/${c.id}` as never} className="list-row client-row">
+              <span className={`avatar ${c.hasTrouble ? 'flag' : ''}`}>{letters(c.fullName)}</span>
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <span className="list-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span className="truncate">{c.fullName}</span>
+                  {c.hasTrouble && <IconFlag size={13} style={{ color: 'var(--red)', flexShrink: 0 }} aria-label="יש תיק מסומן" />}
+                  {dupes.has(c.id) && <span className="chip amber" title="טלפון או תעודת זהות זהים ללקוח אחר">כפילות?</span>}
+                </span>
+                <span className="list-sub client-meta">
+                  <span className="ltr">{c.phone}</span>
+                  {c.idNumber && <span>ת״ז <span className="ltr">{c.idNumber}</span></span>}
+                  {c.city && <span>{c.city}</span>}
+                </span>
               </span>
-              <span className="cli-meta">
-                <span dir="ltr">{client.phone}</span>
-                {client.idNumber && <span>· ת&quot;ז <span dir="ltr">{client.idNumber}</span></span>}
-                {client.city && <span>· {client.city}</span>}
-                <span>· {client.openCaseCount} תיקים פתוחים</span>
-                {client.missingItems > 0 && <span className="cli-missing">· {client.missingItems} מסמכים חסרים</span>}
-                {client.outstandingBalance > 0 && <span className="cli-missing">· יתרה {shekel(client.outstandingBalance)}</span>}
+              <span className="client-stats">
+                <span className="hide-sm tiny muted">
+                  {c.openCaseCount > 0 ? `${c.openCaseCount} ${c.openCaseCount === 1 ? 'תיק פעיל' : 'תיקים פעילים'}` : c.caseCount > 0 ? 'תיקים סגורים' : 'בלי תיק'}
+                </span>
+                {c.missingItems > 0 && <span className="stamp missing">{c.missingItems} חסרים</span>}
+                {c.outstandingBalance > 0 && <span className="chip amber num hide-sm">{shekel(c.outstandingBalance)}</span>}
               </span>
+              <IconChevronLeft size={16} className="muted" />
             </Link>
           ))}
+        </div>
+      )}
+      {(query || chip !== 'all') && shown.length > 0 && (
+        <div className="list-foot">
+          {shown.length} מתוך {clients.length}
+          <button type="button" className="text-link" onClick={() => { setQuery(''); setChip('all'); }}>
+            <IconX size={13} /> הצגת כולם
+          </button>
         </div>
       )}
     </div>
@@ -267,7 +257,7 @@ function ClientsPageInner() {
 export default function ClientsPage() {
   return (
     <Suspense>
-      <ClientsPageInner />
+      <ClientsInner />
     </Suspense>
   );
 }

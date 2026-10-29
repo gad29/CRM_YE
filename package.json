@@ -16,10 +16,10 @@
     "db:status": "node scripts/db-migrate.mjs --status",
     "db:import-json": "node scripts/import-json.mjs",
     "db:import-json:dry-run": "node scripts/import-json.mjs --dry-run",
+    "owner:reset": "node scripts/reset-owner-password.mjs",
     "postinstall": "node scripts/copy-pdf-worker.mjs"
   },
   "dependencies": {
-    "animejs": "^4.3.6",
     "bcryptjs": "^3.0.3",
     "fflate": "^0.8.3",
     "next": "^15.5.12",

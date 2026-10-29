@@ -7,6 +7,7 @@ import { sql } from '@/lib/db';
 import { taskReminderMessage } from '@/lib/messages';
 import { deliver, directChannelAvailable } from '@/lib/notify';
 import { getConfig, reminderContext, toTask } from '@/lib/store';
+import { resolveWatchedTasks } from '@/lib/task-watch';
 
 const MAX_ATTEMPTS = 3;
 const BATCH = 25;
@@ -83,6 +84,9 @@ export function startReminderScheduler() {
     if (running) return;
     running = true;
     try {
+      // Close reminders whose gap was filled before anything is sent about them.
+      const resolved = await resolveWatchedTasks();
+      if (resolved) console.info(`[CRM_YE reminders] ${resolved} closed by themselves`);
       const result = await processDueReminders();
       if (result.claimed) console.info(`[CRM_YE reminders] claimed ${result.claimed}, sent ${result.sent}`);
     } catch (error) {

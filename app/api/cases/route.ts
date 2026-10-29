@@ -8,7 +8,8 @@ import {
   type GovernmentOffice,
   type OperatingCompany,
 } from '@/lib/domain';
-import { createCase, getCaseFinance, getConfig, listClients, listPayments, listVisibleCases, personDirectory } from '@/lib/store';
+import { createCase, getCaseFinance, getConfig, listClients, listPayments, listVisibleCases } from '@/lib/store';
+import { personDirectory } from '@/lib/users';
 import { actorId, getViewer } from '@/lib/viewer';
 
 export async function GET() {
@@ -30,7 +31,7 @@ export async function GET() {
       officeName: officeDisplayName(caseRecord),
       missingItems: countMissingItems(caseRecord),
       finance: getCaseFinance(caseRecord, payments),
-      openedByName: caseRecord.openedBy === 'admin' ? '' : nameOf(caseRecord.openedBy),
+      openedByName: nameOf(caseRecord.openedBy),
       assignedToName: nameOf(caseRecord.assignedTo),
       handlerId: caseHandlerId(caseRecord),
     };

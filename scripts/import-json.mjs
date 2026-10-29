@@ -203,11 +203,13 @@ async function insertAll(client) {
         n(t.clientId), n(t.caseId), t.status ?? 'open', t.createdBy ?? 'admin', t.createdAt, t.updatedAt ?? t.createdAt, tsIn(t.completedAt)],
     );
   }
-  for (const [table, rows] of [['workers', src.workers], ['admins', src.admins]]) {
+  // Workers and extra admins become rows of `users` (migration 002); the owner
+  // account is created separately from ADMIN_EMAIL / ADMIN_PASSWORD.
+  for (const [role, rows] of [['worker', src.workers], ['admin', src.admins]]) {
     for (const p of rows) {
       await q(
-        `INSERT INTO ${table} (id, name, email, phone, password_hash, active, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-        [p.id, p.name, p.email, n(p.phone), p.passwordHash, p.active ?? true, p.createdAt, p.updatedAt ?? p.createdAt],
+        `INSERT INTO users (id, name, email, phone, role, password_hash, active, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [p.id, p.name, p.email, n(p.phone), role, p.passwordHash, p.active ?? true, p.createdAt, p.updatedAt ?? p.createdAt],
       );
     }
   }
@@ -255,8 +257,8 @@ async function verifyAll(client) {
     ['documents', src.documents, await rows('SELECT * FROM documents'), back.document],
     ['payments', src.payments, await rows('SELECT * FROM payments'), back.payment],
     ['tasks', src.tasks, await rows('SELECT * FROM tasks'), back.task],
-    ['workers', src.workers, await rows('SELECT * FROM workers'), back.person],
-    ['admins', src.admins, await rows('SELECT * FROM admins'), back.person],
+    ['workers', src.workers, await rows("SELECT * FROM users WHERE role = 'worker'"), back.person],
+    ['admins', src.admins, await rows("SELECT * FROM users WHERE role = 'admin'"), back.person],
     ['activity', src.activity, await rows('SELECT * FROM activity'), back.activity],
     ['chat-channels', src.chatChannels, await rows('SELECT * FROM chat_channels'), back.channel],
     ['chat-messages', src.chatMessages, await rows('SELECT * FROM chat_messages'), back.message],
@@ -328,7 +330,7 @@ await client.connect();
 try {
   const existing = (
     await client.query(`SELECT (SELECT count(*) FROM clients) + (SELECT count(*) FROM cases) + (SELECT count(*) FROM documents)
-                              + (SELECT count(*) FROM workers) + (SELECT count(*) FROM activity) AS n`)
+                              + (SELECT count(*) FROM users WHERE role <> 'owner') + (SELECT count(*) FROM activity) AS n`)
   ).rows[0].n;
   if (Number(existing) > 0) {
     fail('The database already contains CRM data. Refusing to import twice. (Use an empty database.)');

@@ -7,9 +7,11 @@ export async function GET(request: NextRequest) {
   if (!session) return NextResponse.json({ ok: false }, { status: 401 });
   return NextResponse.json({
     ok: true,
-    role: session.scope,
+    id: session.accountId,
+    role: session.role,
+    isAdmin: session.scope === 'admin',
     email: session.email || '',
-    name: session.name || (session.scope === 'admin' ? 'מנהל' : ''),
-    authDisabled: false,
+    name: session.name || '',
+    mustChangePassword: session.mustChangePassword,
   });
 }

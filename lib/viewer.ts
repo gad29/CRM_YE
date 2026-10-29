@@ -17,9 +17,9 @@ export async function getViewer(): Promise<{ session: SessionPayload; viewer: Vi
   return { session, viewer: sessionToViewer(session) };
 }
 
-/** The id recorded in openedBy/createdBy fields for the current session. */
+/** The id recorded in openedBy/createdBy/author fields: the signed-in person's own id. */
 export function actorId(session: SessionPayload) {
-  return session.scope === 'worker' && session.workerId ? session.workerId : 'admin';
+  return session.accountId;
 }
 
 /**
@@ -38,5 +38,13 @@ export async function requireAdmin() {
   const auth = await requireViewer();
   if (auth instanceof NextResponse) return auth;
   if (auth.viewer.role !== 'admin') return NextResponse.json({ ok: false, error: 'Admin access required' }, { status: 403 });
+  return auth;
+}
+
+/** Only the business owner (e.g. managing other admins). */
+export async function requireOwner() {
+  const auth = await requireViewer();
+  if (auth instanceof NextResponse) return auth;
+  if (auth.session.role !== 'owner') return NextResponse.json({ ok: false, error: 'רק בעל המערכת יכול לבצע פעולה זו' }, { status: 403 });
   return auth;
 }

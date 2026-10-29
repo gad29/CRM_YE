@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import type { ReminderChannel, TaskPriority } from '@/lib/domain';
 import { deleteTask, getTask, taskVisibleTo, updateTask } from '@/lib/store';
+import { getUser } from '@/lib/users';
 import { getViewer } from '@/lib/viewer';
 
 type Params = { params: Promise<{ taskId: string }> };
@@ -34,6 +35,9 @@ export async function PATCH(request: NextRequest, { params }: Params) {
   // Only the admin may reassign tasks.
   if (body.assigneeId !== undefined && auth.viewer.role !== 'admin') {
     delete body.assigneeId;
+  }
+  if (body.assigneeId && body.assigneeId !== existing.assigneeId && !(await getUser(body.assigneeId))?.active) {
+    return NextResponse.json({ ok: false, error: 'האחראי שנבחר לא נמצא או שאינו פעיל' }, { status: 400 });
   }
 
   const updated = await updateTask(taskId, body);

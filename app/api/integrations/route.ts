@@ -29,7 +29,7 @@ export async function POST(request: NextRequest) {
   const to = (body.to || '').trim();
   if (!to) return NextResponse.json({ ok: false, error: 'נא להזין נמען' }, { status: 400 });
   if (!directChannelAvailable(channel)) {
-    return NextResponse.json({ ok: false, error: channel === 'email' ? 'Resend לא הוגדר' : 'WhatsApp לא הוגדר' }, { status: 503 });
+    return NextResponse.json({ ok: false, error: channel === 'email' ? 'שליחת מייל עדיין לא הוגדרה בשרת' : 'וואטסאפ עדיין לא הוגדר בשרת' }, { status: 503 });
   }
   if (!(await consumeRateLimit(`integration-test:${auth.session.accountId}`, 20, 60 * 60))) {
     return NextResponse.json({ ok: false, error: 'יותר מדי הודעות בדיקה — נסו שוב בעוד שעה' }, { status: 429 });

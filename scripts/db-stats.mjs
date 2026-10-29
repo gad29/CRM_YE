@@ -11,7 +11,7 @@ import { loadEnv } from './lib/env.mjs';
 loadEnv(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
 
 const TABLES = [
-  'clients', 'cases', 'case_checklist_items', 'documents', 'payments', 'tasks', 'workers', 'admins',
+  'clients', 'cases', 'case_checklist_items', 'documents', 'payments', 'tasks', 'users', 'login_events',
   'activity', 'chat_channels', 'chat_messages', 'app_kv', 'counters', 'notification_log',
 ];
 
@@ -24,7 +24,8 @@ try {
     counts[table] = exists ? Number((await client.query(`SELECT count(*) AS n FROM ${table}`)).rows[0].n) : null;
   }
   if (process.argv.includes('--empty')) {
-    const used = ['clients', 'cases', 'documents', 'workers', 'activity'].some((t) => counts[t]);
+    // A fresh install already has its owner account, so users don't count as data here.
+    const used = ['clients', 'cases', 'documents', 'activity'].some((t) => counts[t]);
     process.exit(used ? 1 : 0);
   }
   console.log(JSON.stringify(counts));

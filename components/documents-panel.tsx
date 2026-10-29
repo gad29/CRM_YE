@@ -1,7 +1,28 @@
 'use client';
 
+// The files in a client's folder (or in one case): drop to upload, name each
+// file before saving, then preview, edit, rename, send or download — one by
+// one or as a selection (one link, or one ZIP).
 import Link from 'next/link';
 import { useRef, useState } from 'react';
+import './documents-panel.css';
+import { Field, formatDate } from '@/components/ui/bits';
+import { Menu, Modal } from '@/components/ui/overlay';
+import { useToast } from '@/components/ui/toast';
+import {
+  IconDownload,
+  IconFile,
+  IconImage,
+  IconMail,
+  IconMore,
+  IconPencil,
+  IconSend,
+  IconTrash,
+  IconUpload,
+  IconWhatsapp,
+  IconX,
+  IconZip,
+} from '@/components/ui/icons';
 
 export type DocumentItem = {
   id: string;
@@ -26,6 +47,10 @@ type Props = {
   /** Client contact — enables the "send to client" channels. */
   clientContact?: { email?: string; phone?: string };
   onChanged: () => void;
+  /** Document id → the checklist item it belongs to, shown under the file name. */
+  linkedLabels?: Record<string, string>;
+  /** Text for the empty folder. */
+  emptyText?: string;
 };
 
 type StagedFile = { file: File; label: string };
@@ -33,26 +58,26 @@ type StagedFile = { file: File; label: string };
 const NEW_ITEM = '__new__';
 
 function formatSize(bytes: number) {
-  if (bytes > 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
-  return `${Math.max(1, Math.round(bytes / 1024))}KB`;
-}
-
-function formatDate(iso: string) {
-  return new Date(iso).toLocaleDateString('he-IL', { day: 'numeric', month: 'short', year: 'numeric' });
-}
-
-function fileEmoji(mimeType: string, name: string) {
-  if (mimeType.startsWith('image/')) return '🖼️';
-  if (mimeType === 'application/pdf' || name.toLowerCase().endsWith('.pdf')) return '📄';
-  if (mimeType.includes('word') || /\.(docx?|rtf)$/i.test(name)) return '📝';
-  if (mimeType.includes('sheet') || /\.(xlsx?|csv)$/i.test(name)) return '📊';
-  return '📎';
+  if (bytes > 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
 /** Default display name: the file name without its extension. */
 function defaultLabel(fileName: string) {
   const dot = fileName.lastIndexOf('.');
   return dot > 0 ? fileName.slice(0, dot) : fileName;
+}
+
+function fileKind(mimeType: string, name: string) {
+  if (mimeType.startsWith('image/')) return 'תמונה';
+  if (mimeType === 'application/pdf' || name.toLowerCase().endsWith('.pdf')) return 'PDF';
+  if (mimeType.includes('word') || /\.(docx?|rtf)$/i.test(name)) return 'Word';
+  if (mimeType.includes('sheet') || /\.(xlsx?|csv)$/i.test(name)) return 'Excel';
+  return 'קובץ';
+}
+
+export function DocIcon({ mimeType }: { mimeType: string }) {
+  return <span className="doc-icon">{mimeType.startsWith('image/') ? <IconImage size={17} /> : <IconFile size={17} />}</span>;
 }
 
 export function isEditableDocument(doc: Pick<DocumentItem, 'mimeType' | 'originalName'>) {
@@ -63,67 +88,63 @@ export function isEditableDocument(doc: Pick<DocumentItem, 'mimeType' | 'origina
   );
 }
 
-export function DocumentsPanel({ clientId, documents, caseId, checklistOptions, clientContact, onChanged }: Props) {
+export function DocumentsPanel({
+  clientId,
+  documents,
+  caseId,
+  checklistOptions,
+  clientContact,
+  onChanged,
+  linkedLabels,
+  emptyText,
+}: Props) {
+  const toast = useToast();
   const inputRef = useRef<HTMLInputElement>(null);
   const [staged, setStaged] = useState<StagedFile[]>([]);
   const [uploading, setUploading] = useState(false);
-  const [dragover, setDragover] = useState(false);
+  const [over, setOver] = useState(false);
   const [error, setError] = useState('');
   const [checklistCode, setChecklistCode] = useState('');
   const [newItemName, setNewItemName] = useState('');
-  const [busy, setBusy] = useState<string | null>(null);
-  const [sendOpen, setSendOpen] = useState<string | null>(null);
-  const [sending, setSending] = useState(false);
-  const [sentNote, setSentNote] = useState<string | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
-  const [bundleOpen, setBundleOpen] = useState(false);
-  const [bundleSent, setBundleSent] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [renaming, setRenaming] = useState<{ doc: DocumentItem; value: string } | null>(null);
+  const [deleting, setDeleting] = useState<DocumentItem | null>(null);
+  const [busy, setBusy] = useState(false);
 
   const canEmail = Boolean(clientContact?.email);
   const canPhone = Boolean(clientContact?.phone);
-  const canSend = canEmail || canPhone;
   const zipBase = `/api/clients/${clientId}/documents/zip`;
   const zipAllHref = caseId ? `${zipBase}?caseId=${encodeURIComponent(caseId)}` : zipBase;
   const zipSelectedHref = `${zipBase}?ids=${selected.map(encodeURIComponent).join(',')}`;
+  const allSelected = documents.length > 0 && selected.length === documents.length;
 
   function toggleSelected(id: string) {
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   }
 
-  /** Send a set of documents as a single link. */
-  async function sendDocuments(documentIds: string[], channel: 'email' | 'whatsapp', kind: 'single' | 'bundle') {
+  /** Send a set of documents to the client as one secure link. */
+  async function sendDocuments(documentIds: string[], channel: 'email' | 'whatsapp') {
     setSending(true);
-    setError('');
     try {
       const res = await fetch('/api/documents/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ documentIds, channel }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) {
-        setError(data.error || 'שליחת המסמכים נכשלה');
+        toast(data.error || 'שליחת המסמכים נכשלה', 'error');
         return;
       }
-      if (kind === 'single') {
-        setSendOpen(null);
-        setSentNote(documentIds[0]);
-        setTimeout(() => setSentNote((v) => (v === documentIds[0] ? null : v)), 3000);
-      } else {
-        setBundleOpen(false);
-        setSelected([]);
-        setBundleSent(true);
-        setTimeout(() => setBundleSent(false), 3500);
-      }
+      const where = channel === 'email' ? 'במייל' : 'בוואטסאפ';
+      toast(documentIds.length === 1 ? `הקישור נשלח ללקוח ${where}` : `קישור ל-${documentIds.length} מסמכים נשלח ללקוח ${where}`);
+      if (documentIds.length > 1) setSelected([]);
     } catch {
-      setError('שגיאת תקשורת בשליחה');
+      toast('אין חיבור לשרת — השליחה לא בוצעה', 'error');
     } finally {
       setSending(false);
     }
-  }
-
-  function sendDocument(docId: string, channel: 'email' | 'whatsapp') {
-    return sendDocuments([docId], channel, 'single');
   }
 
   function stageFiles(files: FileList | File[]) {
@@ -132,14 +153,6 @@ export function DocumentsPanel({ clientId, documents, caseId, checklistOptions, 
     setError('');
     setStaged((prev) => [...prev, ...list.map((file) => ({ file, label: defaultLabel(file.name) }))]);
     if (inputRef.current) inputRef.current.value = '';
-  }
-
-  function updateLabel(index: number, label: string) {
-    setStaged((prev) => prev.map((item, i) => (i === index ? { ...item, label } : item)));
-  }
-
-  function removeStaged(index: number) {
-    setStaged((prev) => prev.filter((_, i) => i !== index));
   }
 
   function clearStaged() {
@@ -159,7 +172,7 @@ export function DocumentsPanel({ clientId, documents, caseId, checklistOptions, 
       // "Document not in the list": create a named checklist item first, then attach.
       if (code === NEW_ITEM) {
         if (!newItemName.trim()) {
-          setError('נא לתת שם למסמך החדש ברשימה');
+          setError('תנו שם למסמך החדש ברשימה');
           return;
         }
         const res = await fetch(`/api/cases/${caseId}/checklist`, {
@@ -169,7 +182,7 @@ export function DocumentsPanel({ clientId, documents, caseId, checklistOptions, 
         });
         const data = await res.json();
         if (!res.ok || !data.ok) {
-          setError(data.error || 'יצירת המסמך ברשימה נכשלה');
+          setError(data.error || 'הוספת המסמך לרשימה נכשלה');
           return;
         }
         code = data.data.code;
@@ -184,263 +197,322 @@ export function DocumentsPanel({ clientId, documents, caseId, checklistOptions, 
       if (code && code !== NEW_ITEM) form.append('checklistCode', code);
 
       const res = await fetch(`/api/clients/${clientId}/documents`, { method: 'POST', body: form });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) {
         setError(data.error || 'ההעלאה נכשלה');
         return;
       }
+      toast(staged.length === 1 ? 'הקובץ נשמר בתיקייה' : `${staged.length} קבצים נשמרו בתיקייה`);
       clearStaged();
       onChanged();
     } catch {
-      setError('שגיאת תקשורת בהעלאה');
+      setError('אין חיבור לשרת — הקבצים לא הועלו');
     } finally {
       setUploading(false);
     }
   }
 
-  async function renameDocument(doc: DocumentItem) {
-    const label = window.prompt('שם תצוגה למסמך:', doc.label || doc.originalName);
-    if (label === null) return;
-    setBusy(doc.id);
+  async function saveRename() {
+    if (!renaming) return;
+    setBusy(true);
     try {
-      await fetch(`/api/documents/${doc.id}`, {
+      const res = await fetch(`/api/documents/${renaming.doc.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ label }),
+        body: JSON.stringify({ label: renaming.value }),
       });
+      if (!res.ok) {
+        toast('שינוי השם נכשל', 'error');
+        return;
+      }
+      setRenaming(null);
+      toast('השם עודכן');
       onChanged();
     } finally {
-      setBusy(null);
+      setBusy(false);
     }
   }
 
-  async function deleteDocument(doc: DocumentItem) {
-    if (!window.confirm(`למחוק את המסמך "${doc.label || doc.originalName}"? הקובץ יימחק מהתיקייה.`)) return;
-    setBusy(doc.id);
+  async function confirmDelete() {
+    if (!deleting) return;
+    setBusy(true);
     try {
-      await fetch(`/api/documents/${doc.id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/documents/${deleting.id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        toast('מחיקת הקובץ נכשלה', 'error');
+        return;
+      }
+      setSelected((prev) => prev.filter((id) => id !== deleting.id));
+      setDeleting(null);
+      toast('הקובץ נמחק');
       onChanged();
     } finally {
-      setBusy(null);
+      setBusy(false);
     }
   }
+
+  const nameOf = (doc: DocumentItem) => doc.label || doc.originalName;
 
   return (
-    <div>
+    <div className="docs-panel">
       <div
-        className={`upload-zone ${dragover ? 'dragover' : ''}`}
+        className={`dropzone ${over ? 'over' : ''}`}
         onDragOver={(e) => {
           e.preventDefault();
-          setDragover(true);
+          setOver(true);
         }}
-        onDragLeave={() => setDragover(false)}
+        onDragLeave={() => setOver(false)}
         onDrop={(e) => {
           e.preventDefault();
-          setDragover(false);
+          setOver(false);
           stageFiles(e.dataTransfer.files);
         }}
       >
-        <div className="upload-zone-icon">📁</div>
-        <div>גרור לכאן קבצים או</div>
-        <label className="upload-zone-label">
-          בחר קבצים מהמחשב
-          <input
-            ref={inputRef}
-            className="upload-file-input"
-            type="file"
-            multiple
-            onChange={(e) => e.target.files && stageFiles(e.target.files)}
-          />
-        </label>
-        <div className="upload-zone-hint">
-          PDF, תמונות, וורד — כל סוג קובץ, כמה קבצים בבת אחת. אחרי הבחירה אפשר לתת שם לכל קובץ לפני השמירה.
+        <div className="row" style={{ justifyContent: 'center', gap: 8 }}>
+          <IconUpload size={18} />
+          <span>
+            גררו קבצים לכאן, או{' '}
+            <button type="button" className="text-link" style={{ background: 'none', border: 0, padding: 0 }} onClick={() => inputRef.current?.click()}>
+              בחרו מהמחשב
+            </button>
+          </span>
         </div>
+        <div className="tiny" style={{ marginTop: 4 }}>PDF, תמונות, Word — כמה קבצים יחד. לפני השמירה אפשר לתת שם לכל קובץ.</div>
+        <input ref={inputRef} type="file" multiple hidden onChange={(e) => e.target.files && stageFiles(e.target.files)} />
       </div>
 
       {staged.length > 0 && (
-        <div className="card nested-card" style={{ marginTop: 12, padding: 16 }}>
-          <div className="section-heading" style={{ marginBottom: 8 }}>
-            <h3 style={{ margin: 0, fontSize: 14 }}>קבצים להעלאה ({staged.length})</h3>
-            <button type="button" className="doc-action-btn" onClick={clearStaged}>✕ בטל הכל</button>
+        <div className="staged">
+          <div className="row between">
+            <span className="strong small">
+              {staged.length === 1 ? 'קובץ אחד מוכן להעלאה' : `${staged.length} קבצים מוכנים להעלאה`}
+            </span>
+            <button type="button" className="button button-quiet button-compact" onClick={clearStaged}>
+              ביטול
+            </button>
           </div>
-
           {staged.map((item, index) => (
-            <div key={`${item.file.name}-${index}`} className="doc-row" style={{ gap: 10 }}>
-              <span style={{ fontSize: 18 }}>{fileEmoji(item.file.type, item.file.name)}</span>
-              <div style={{ flex: 1, minWidth: 0 }}>
+            <div key={`${item.file.name}-${index}`} className="doc-row">
+              <DocIcon mimeType={item.file.type} />
+              <div className="doc-name">
                 <input
+                  className="input"
                   value={item.label}
-                  onChange={(e) => updateLabel(index, e.target.value)}
-                  placeholder="שם המסמך…"
-                  style={{ width: '100%', padding: '8px 10px', borderRadius: 10, border: '1px solid var(--line)', background: 'var(--surface)', color: 'var(--text)', fontSize: 13 }}
+                  onChange={(e) => setStaged((prev) => prev.map((s, i) => (i === index ? { ...s, label: e.target.value } : s)))}
+                  placeholder="שם המסמך"
+                  aria-label="שם המסמך"
+                  style={{ height: 34 }}
                 />
-                <span className="muted" style={{ fontSize: 11 }}>
+                <div className="tiny muted" style={{ marginTop: 3 }}>
                   {item.file.name} · {formatSize(item.file.size)}
-                </span>
+                </div>
               </div>
-              <button type="button" className="doc-action-btn reject" onClick={() => removeStaged(index)} title="הסר">✕</button>
+              <button
+                type="button"
+                className="icon-button small"
+                onClick={() => setStaged((prev) => prev.filter((_, i) => i !== index))}
+                aria-label="הסרה מהרשימה"
+              >
+                <IconX size={15} />
+              </button>
             </div>
           ))}
 
           {caseId && (
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
-              <select
-                value={checklistCode}
-                onChange={(e) => setChecklistCode(e.target.value)}
-                style={{ flex: 1, minWidth: 200, padding: '9px 12px', borderRadius: 10, border: '1px solid var(--line)', background: 'var(--surface)', color: 'var(--text)', fontSize: 13 }}
-              >
-                <option value="">ללא שיוך לרשימת המסמכים</option>
+            <div className="row" style={{ alignItems: 'stretch' }}>
+              <select className="select" style={{ flex: 1, minWidth: 200 }} value={checklistCode} onChange={(e) => setChecklistCode(e.target.value)} aria-label="שיוך לרשימת המסמכים">
+                <option value="">בלי שיוך לרשימת המסמכים</option>
                 {(checklistOptions ?? []).map((item) => (
-                  <option key={item.code} value={item.code}>שיוך אל: {item.label}</option>
+                  <option key={item.code} value={item.code}>
+                    שיוך אל: {item.label}
+                  </option>
                 ))}
-                <option value={NEW_ITEM}>➕ מסמך חדש שלא ברשימה…</option>
+                <option value={NEW_ITEM}>מסמך חדש שלא ברשימה…</option>
               </select>
               {checklistCode === NEW_ITEM && (
                 <input
+                  className="input"
+                  style={{ flex: 1, minWidth: 180 }}
                   value={newItemName}
                   onChange={(e) => setNewItemName(e.target.value)}
-                  placeholder="שם המסמך החדש ברשימה…"
+                  placeholder="שם המסמך החדש ברשימה"
                   autoFocus
-                  style={{ flex: 1, minWidth: 180, padding: '9px 12px', borderRadius: 10, border: '1px solid var(--accent)', background: 'var(--surface)', color: 'var(--text)', fontSize: 13 }}
                 />
               )}
             </div>
           )}
 
-          {error && <p className="form-error" style={{ marginTop: 10 }}>{error}</p>}
+          {error && <p className="form-error">{error}</p>}
 
-          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-            <button type="button" className="button button-compact" disabled={uploading} onClick={() => void uploadStaged()}>
-              {uploading ? 'מעלה…' : `⬆ העלה ${staged.length} ${staged.length === 1 ? 'קובץ' : 'קבצים'}`}
+          <div className="row">
+            <button type="button" className="button" disabled={uploading} onClick={() => void uploadStaged()}>
+              <IconUpload size={16} />
+              {uploading ? 'מעלה…' : staged.length === 1 ? 'העלאת הקובץ' : `העלאת ${staged.length} הקבצים`}
             </button>
-            <label className="button button-secondary button-compact" style={{ cursor: 'pointer' }}>
-              + הוסף עוד קבצים
-              <input type="file" multiple style={{ display: 'none' }} onChange={(e) => e.target.files && stageFiles(e.target.files)} />
-            </label>
+            <button type="button" className="button button-secondary" onClick={() => inputRef.current?.click()}>
+              הוספת קבצים
+            </button>
           </div>
         </div>
       )}
 
-      {error && staged.length === 0 && <p className="form-error" style={{ marginTop: 10 }}>{error}</p>}
-
       {documents.length === 0 ? (
-        <p className="muted" style={{ marginTop: 16 }}>אין עדיין מסמכים בתיקייה.</p>
+        <p className="muted small" style={{ margin: '14px 2px 0' }}>{emptyText ?? 'אין עדיין קבצים בתיקייה.'}</p>
       ) : (
-        <div style={{ marginTop: 16 }}>
-          <div className="split" style={{ marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
-            {documents.length > 1 && (
-              <label className="muted" style={{ fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                <input
-                  type="checkbox"
-                  checked={selected.length === documents.length && documents.length > 0}
-                  onChange={(e) => setSelected(e.target.checked ? documents.map((d) => d.id) : [])}
-                />
-                בחר הכל
-              </label>
-            )}
-            <a className="doc-action-btn" href={zipAllHref} download title="כל המסמכים בקובץ ZIP אחד">
-              הורד הכל (ZIP)
-            </a>
-            {selected.length > 0 && (
-              <a className="doc-action-btn" href={zipSelectedHref} download>
-                הורד {selected.length} נבחרים (ZIP)
+        <div style={{ marginTop: 14 }}>
+          {selected.length > 0 ? (
+            <div className="selection-bar">
+              <span className="strong small">{selected.length === 1 ? 'קובץ אחד נבחר' : `${selected.length} קבצים נבחרו`}</span>
+              <span className="spacer" />
+              <a className="button button-secondary button-compact" href={zipSelectedHref} download>
+                <IconZip size={15} />
+                הורדה כ-ZIP
               </a>
-            )}
-              {canSend && selected.length > 0 && (
-                <button
-                  type="button"
-                  className={`doc-action-btn approve ${bundleOpen ? 'active-send' : ''}`}
-                  onClick={() => setBundleOpen((v) => !v)}
-                >
-                  📤 שלח {selected.length} מסמכים בקישור אחד
+              {canEmail && (
+                <button type="button" className="button button-secondary button-compact" disabled={sending} onClick={() => sendDocuments(selected, 'email')}>
+                  <IconMail size={15} />
+                  שליחה במייל
                 </button>
               )}
-              {bundleSent && <span className="text-feedback-success" style={{ fontWeight: 600, fontSize: 13 }}>✓ נשלח קישור ללקוח</span>}
-          </div>
-          {bundleOpen && selected.length > 0 && (
-            <div className="send-picker" style={{ marginBottom: 12 }}>
-              <span className="muted" style={{ fontSize: 12 }}>שליחת קישור אחד ל-{selected.length} מסמכים דרך:</span>
-              {canEmail && (
-                <button type="button" className="doc-action-btn approve" disabled={sending} onClick={() => sendDocuments(selected, 'email', 'bundle')}>📧 אימייל</button>
-              )}
               {canPhone && (
-                <button type="button" className="doc-action-btn approve" disabled={sending} onClick={() => sendDocuments(selected, 'whatsapp', 'bundle')}>💬 וואטסאפ</button>
+                <button type="button" className="button button-secondary button-compact" disabled={sending} onClick={() => sendDocuments(selected, 'whatsapp')}>
+                  <IconWhatsapp size={15} />
+                  שליחה בוואטסאפ
+                </button>
               )}
-              <button type="button" className="doc-action-btn" onClick={() => setBundleOpen(false)}>ביטול</button>
-              {sending && <span className="muted" style={{ fontSize: 12 }}>שולח…</span>}
-              {error && <p className="form-error" style={{ width: '100%', margin: '4px 0 0' }}>{error}</p>}
+              <button type="button" className="button button-quiet button-compact" onClick={() => setSelected([])}>
+                ביטול הבחירה
+              </button>
+            </div>
+          ) : (
+            <div className="row between" style={{ padding: '0 6px 6px' }}>
+              <label className="checkbox small muted">
+                <input type="checkbox" checked={allSelected} onChange={(e) => setSelected(e.target.checked ? documents.map((d) => d.id) : [])} />
+                בחירת הכל
+              </label>
+              <a className="button button-quiet button-compact" href={zipAllHref} download title="כל הקבצים בקובץ ZIP אחד">
+                <IconZip size={15} />
+                הורדת הכל (ZIP)
+              </a>
             </div>
           )}
-          {documents.map((doc) => (
-            <div key={doc.id}>
-              <div className="doc-row">
-                {documents.length > 1 && (
-                  <input
-                    type="checkbox"
-                    checked={selected.includes(doc.id)}
-                    onChange={() => toggleSelected(doc.id)}
-                    title="בחירה להורדה או לשליחה"
-                  />
-                )}
-                <span style={{ fontSize: 20 }}>{fileEmoji(doc.mimeType, doc.originalName)}</span>
+
+          <div>
+            {documents.map((doc) => (
+              <div key={doc.id} className={`doc-row ${selected.includes(doc.id) ? 'picked' : ''}`}>
+                <input
+                  type="checkbox"
+                  className="doc-check"
+                  checked={selected.includes(doc.id)}
+                  onChange={() => toggleSelected(doc.id)}
+                  aria-label={`בחירת ${nameOf(doc)}`}
+                />
+                <DocIcon mimeType={doc.mimeType} />
                 <div className="doc-name">
-                  <a href={`/api/documents/${doc.id}`} target="_blank" rel="noreferrer" className="text-link">
-                    {doc.label || doc.originalName}
+                  <a href={`/api/documents/${doc.id}`} target="_blank" rel="noreferrer" className="doc-title truncate" title={nameOf(doc)}>
+                    {nameOf(doc)}
                   </a>
-                  <span className="muted" style={{ display: 'block', fontSize: 11 }}>
-                    {formatSize(doc.size)} · {formatDate(doc.uploadedAt)}
+                  <div className="tiny muted">
+                    {fileKind(doc.mimeType, doc.originalName)} · {formatSize(doc.size)} · {formatDate(doc.uploadedAt)}
                     {doc.editedFromId && ' · גרסה ערוכה'}
-                    {sentNote === doc.id && <span className="text-feedback-success" style={{ fontWeight: 600 }}> · ✓ נשלח ללקוח</span>}
-                  </span>
+                    {linkedLabels?.[doc.id] && <> · {linkedLabels[doc.id]}</>}
+                  </div>
                 </div>
                 <div className="doc-actions">
                   {isEditableDocument(doc) && (
-                    <Link className="doc-action-btn approve" href={`/documents/${doc.id}/edit` as never}>
-                      ✏️ עריכה
+                    <Link className="icon-button small" href={`/documents/${doc.id}/edit` as never} title="עריכה (סימון, טקסט, חתימה)" aria-label="עריכה">
+                      <IconPencil size={15} />
                     </Link>
                   )}
-                  {canSend && (
-                    <button
-                      type="button"
-                      className={`doc-action-btn ${sendOpen === doc.id ? 'active-send' : ''}`}
-                      onClick={() => setSendOpen((v) => (v === doc.id ? null : doc.id))}
-                      title="שליחת המסמך ללקוח בקישור מאובטח"
-                    >
-                      📤 שלח ללקוח
-                    </button>
-                  )}
-                  <a className="doc-action-btn" href={`/api/documents/${doc.id}?download=1`}>
-                    ⬇ הורדה
+                  <a className="icon-button small" href={`/api/documents/${doc.id}?download=1`} title="הורדה" aria-label="הורדה">
+                    <IconDownload size={15} />
                   </a>
-                  <button type="button" className="doc-action-btn" disabled={busy === doc.id} onClick={() => renameDocument(doc)}>
-                    שינוי שם
-                  </button>
-                  <button type="button" className="doc-action-btn reject" disabled={busy === doc.id} onClick={() => deleteDocument(doc)}>
-                    מחיקה
-                  </button>
+                  <Menu trigger={<IconMore size={16} />} label={`פעולות על ${nameOf(doc)}`}>
+                    {canEmail && (
+                      <button type="button" className="menu-item" disabled={sending} onClick={() => sendDocuments([doc.id], 'email')}>
+                        <IconMail size={16} />
+                        שליחה ללקוח במייל
+                      </button>
+                    )}
+                    {canPhone && (
+                      <button type="button" className="menu-item" disabled={sending} onClick={() => sendDocuments([doc.id], 'whatsapp')}>
+                        <IconWhatsapp size={16} />
+                        שליחה ללקוח בוואטסאפ
+                      </button>
+                    )}
+                    {!canEmail && !canPhone && (
+                      <span className="menu-item muted" style={{ cursor: 'default' }}>
+                        <IconSend size={16} />
+                        אין ללקוח טלפון או מייל
+                      </span>
+                    )}
+                    <button type="button" className="menu-item" onClick={() => setRenaming({ doc, value: nameOf(doc) })}>
+                      <IconPencil size={16} />
+                      שינוי שם
+                    </button>
+                    <div className="menu-sep" />
+                    <button type="button" className="menu-item danger" onClick={() => setDeleting(doc)}>
+                      <IconTrash size={16} />
+                      מחיקת הקובץ
+                    </button>
+                  </Menu>
                 </div>
               </div>
-              {sendOpen === doc.id && (
-                <div className="send-picker">
-                  <span className="muted" style={{ fontSize: 12 }}>שליחת קישור ל&quot;{doc.label || doc.originalName}&quot; דרך:</span>
-                  {canEmail && (
-                    <button type="button" className="doc-action-btn approve" disabled={sending} onClick={() => sendDocument(doc.id, 'email')}>
-                      📧 אימייל
-                    </button>
-                  )}
-                  {canPhone && (
-                    <button type="button" className="doc-action-btn approve" disabled={sending} onClick={() => sendDocument(doc.id, 'whatsapp')}>
-                      💬 וואטסאפ
-                    </button>
-                  )}
-                  <button type="button" className="doc-action-btn" onClick={() => setSendOpen(null)}>ביטול</button>
-                  {sending && <span className="muted" style={{ fontSize: 12 }}>שולח…</span>}
-                  {error && <p className="form-error" style={{ width: '100%', margin: '4px 0 0' }}>{error}</p>}
-                </div>
-              )}
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
+      )}
+
+      {renaming && (
+        <Modal
+          title="שינוי שם הקובץ"
+          size="narrow"
+          onClose={() => setRenaming(null)}
+          footer={
+            <>
+              <button type="button" className="button button-secondary" onClick={() => setRenaming(null)}>
+                ביטול
+              </button>
+              <button type="button" className="button" disabled={busy} onClick={() => void saveRename()}>
+                שמירת השם
+              </button>
+            </>
+          }
+        >
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void saveRename();
+            }}
+          >
+            <Field label="השם שיופיע בתיקייה">
+              <input value={renaming.value} onChange={(e) => setRenaming({ ...renaming, value: e.target.value })} />
+            </Field>
+          </form>
+        </Modal>
+      )}
+
+      {deleting && (
+        <Modal
+          title="מחיקת הקובץ"
+          size="narrow"
+          onClose={() => setDeleting(null)}
+          footer={
+            <>
+              <button type="button" className="button button-secondary" onClick={() => setDeleting(null)}>
+                ביטול
+              </button>
+              <button type="button" className="button button-danger" disabled={busy} onClick={() => void confirmDelete()}>
+                <IconTrash size={16} />
+                מחיקה
+              </button>
+            </>
+          }
+        >
+          <p style={{ margin: 0 }}>
+            הקובץ <strong>{nameOf(deleting)}</strong> יימחק מהתיקייה, ואי אפשר לשחזר אותו.
+          </p>
+        </Modal>
       )}
     </div>
   );
