@@ -4,12 +4,13 @@ import '@/app/styles/tools.css';
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { optionLabel, PAYMENT_STATUS_LABELS, stageLabelOf, type CaseStage, type PaymentStatus } from '@/lib/domain';
-import { useConfig } from '@/components/config-provider';
+import { useConfig, useText } from '@/components/config-provider';
+import { isPaymentStage } from '@/components/case-trays';
 import { CompanyChip } from '@/components/company-chip';
 import { Empty, Field, PageHead, formatDate, shekel } from '@/components/ui/bits';
 import { Modal } from '@/components/ui/overlay';
 import { useToast } from '@/components/ui/toast';
-import { IconCoins, IconPencil, IconPlus, IconSearch, IconTrash } from '@/components/ui/icons';
+import { IconCoins, IconPencil, IconPlus, IconSearch, IconSettings, IconTrash } from '@/components/ui/icons';
 
 type CaseRow = {
   id: string;
@@ -45,6 +46,7 @@ type PaymentForm = { caseId: string; amount: string; method: string; paidAt: str
 
 export default function PaymentsPage() {
   const config = useConfig();
+  const t = useText();
   const toast = useToast();
   const [cases, setCases] = useState<CaseRow[]>([]);
   const [payments, setPayments] = useState<PaymentRow[]>([]);
@@ -70,8 +72,10 @@ export default function PaymentsPage() {
   useEffect(reload, [reload]);
 
   const caseById = useMemo(() => new Map(cases.map((c) => [c.id, c])), [cases]);
-  const withFee = useMemo(() => cases.filter((c) => c.finance.fee > 0 || c.finance.paid > 0 || c.stage === 'awaiting-payment'), [cases]);
-  const awaiting = useMemo(() => withFee.filter((c) => c.stage === 'awaiting-payment' && c.finance.status !== 'paid'), [withFee]);
+  // "Waiting for payment" = a stage that feeds the payment tray (set per stage in Settings).
+  const awaitingStage = useCallback((c: CaseRow) => isPaymentStage(config, c.stage), [config]);
+  const withFee = useMemo(() => cases.filter((c) => c.finance.fee > 0 || c.finance.paid > 0 || awaitingStage(c)), [cases, awaitingStage]);
+  const awaiting = useMemo(() => withFee.filter((c) => awaitingStage(c) && c.finance.status !== 'paid'), [withFee, awaitingStage]);
 
   const totals = useMemo(() => {
     const now = new Date();
@@ -100,9 +104,9 @@ export default function PaymentsPage() {
     // Cases waiting for payment first, then the biggest balance.
     return [...list].sort(
       (a, b) =>
-        Number(b.stage === 'awaiting-payment') - Number(a.stage === 'awaiting-payment') || b.finance.balance - a.finance.balance,
+        Number(awaitingStage(b)) - Number(awaitingStage(a)) || b.finance.balance - a.finance.balance,
     );
-  }, [withFee, awaiting, filter, query]);
+  }, [withFee, awaiting, filter, query, awaitingStage]);
 
   const filterOptions: { value: Filter; label: string; n: number }[] = [
     { value: 'open', label: 'יתרה פתוחה', n: totals.openCount },
@@ -186,6 +190,25 @@ export default function PaymentsPage() {
   const selectedCase = caseById.get(form.caseId);
   const editingPayment = editing && editing !== 'new' ? editing : null;
 
+  if (!config.modules.payments) {
+    return (
+      <>
+        <PageHead title="תשלומים" />
+        <Empty
+          icon={<IconCoins size={32} />}
+          title="אזור התשלומים כבוי"
+          action={
+            <Link className="button button-secondary" href={'/admin/settings?tab=interface' as never}>
+              <IconSettings size={16} /> להגדרות הממשק
+            </Link>
+          }
+        >
+          שכר טרחה, גבייה ותשלומים לא מוצגים במערכת. אפשר להחזיר אותם בהגדרות ← ממשק.
+        </Empty>
+      </>
+    );
+  }
+
   return (
     <>
       <PageHead
@@ -193,7 +216,7 @@ export default function PaymentsPage() {
         sub="מי שילם, מי חייב וכמה — לפי תיק."
         actions={
           <button type="button" className="button" onClick={() => openNew()}>
-            <IconPlus size={16} /> רישום תשלום
+            <IconPlus size={16} /> {t('case.recordPayment')}
           </button>
         }
       />
@@ -264,7 +287,7 @@ export default function PaymentsPage() {
                 {rows.map((c) => {
                   const pct = c.finance.fee > 0 ? Math.min(100, Math.round((c.finance.paid / c.finance.fee) * 100)) : c.finance.status === 'paid' ? 100 : 0;
                   return (
-                    <tr key={c.id} className={c.stage === 'awaiting-payment' ? 'awaiting' : ''}>
+                    <tr key={c.id} className={awaitingStage(c) ? 'awaiting' : ''}>
                       <td>
                         <Link className="list-title" href={`/cases/${c.id}` as never}>
                           {c.clientName}
@@ -275,7 +298,7 @@ export default function PaymentsPage() {
                         </div>
                       </td>
                       <td className="small">
-                        {c.stage === 'awaiting-payment' ? <span className="chip amber">{stageLabelOf(config, c.stage)}</span> : <span className="ink-2">{stageLabelOf(config, c.stage)}</span>}
+                        {awaitingStage(c) ? <span className="chip amber">{stageLabelOf(config, c.stage)}</span> : <span className="ink-2">{stageLabelOf(config, c.stage)}</span>}
                       </td>
                       <td className="money">{shekel(c.finance.fee)}</td>
                       <td>
@@ -294,7 +317,7 @@ export default function PaymentsPage() {
                       <td style={{ textAlign: 'end' }}>
                         {c.finance.balance > 0 && (
                           <button type="button" className="button button-secondary button-compact" onClick={() => openNew(c)}>
-                            רישום תשלום
+                            {t('case.recordPayment')}
                           </button>
                         )}
                       </td>

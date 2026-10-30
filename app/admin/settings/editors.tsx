@@ -3,21 +3,24 @@
 // Editors for the runtime configuration (lib/domain AppConfig). Each card
 // keeps its own draft and saves only its own keys.
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { CASE_STAGES, COMPANY_COLORS, STAGE_LABELS, type AppConfig, type ConfigOption } from '@/lib/domain';
+import { COMPANY_COLORS, type AppConfig, type ConfigOption } from '@/lib/domain';
 import { Field } from '@/components/ui/bits';
 import { IconCheck, IconDownload, IconFile, IconPlus, IconUpload, IconX } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
 
-export type SaveFn = (patch: Partial<AppConfig>) => Promise<boolean>;
+/** A config patch; stageMoves sends where the cases of removed stages go. */
+export type ConfigPatch = Partial<AppConfig> & { stageMoves?: Record<string, string> };
 
-function useSaver(save: SaveFn) {
+export type SaveFn = (patch: ConfigPatch) => Promise<boolean>;
+
+export function useSaver(save: SaveFn) {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => {
     if (timer.current) clearTimeout(timer.current);
   }, []);
-  async function run(patch: Partial<AppConfig>) {
+  async function run(patch: ConfigPatch) {
     setSaving(true);
     setSaved(false);
     const ok = await save(patch);
@@ -31,7 +34,7 @@ function useSaver(save: SaveFn) {
   return { saving, saved, run };
 }
 
-function CardShell({
+export function CardShell({
   title,
   sub,
   children,
@@ -40,6 +43,7 @@ function CardShell({
   saved,
   dirty,
   extra,
+  blocked,
 }: {
   title: string;
   sub?: ReactNode;
@@ -49,6 +53,8 @@ function CardShell({
   saved: boolean;
   dirty: boolean;
   extra?: ReactNode;
+  /** Why saving is not possible right now (shown instead of the unsaved note). */
+  blocked?: string;
 }) {
   return (
     <section className="card">
@@ -61,7 +67,7 @@ function CardShell({
       {children}
       <div className="card-foot">
         {extra}
-        <button type="button" className="button button-compact" disabled={saving || !dirty} onClick={onSave}>
+        <button type="button" className="button button-compact" disabled={saving || !dirty || Boolean(blocked)} onClick={onSave}>
           {saving ? 'שומר…' : 'שמירה'}
         </button>
         {saved && (
@@ -69,13 +75,14 @@ function CardShell({
             <IconCheck size={15} /> נשמר
           </span>
         )}
-        {dirty && !saving && !saved && <span className="tiny muted">יש שינויים שלא נשמרו</span>}
+        {dirty && blocked && !saving && <span className="tiny settings-blocked">{blocked}</span>}
+        {dirty && !blocked && !saving && !saved && <span className="tiny muted">יש שינויים שלא נשמרו</span>}
       </div>
     </section>
   );
 }
 
-const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+export const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 // ── Business details ─────────────────────────────────────────────────────────
 
@@ -291,41 +298,6 @@ export function TemplateEditor({ items, save }: { items: { code: string; label: 
             <button type="button" className="icon-button small" onClick={() => setRows((prev) => prev.filter((_, i) => i !== index))} aria-label={`הסרת ${row.label || 'המסמך'}`}>
               <IconX size={15} />
             </button>
-          </div>
-        ))}
-      </div>
-    </CardShell>
-  );
-}
-
-// ── Stage wording ────────────────────────────────────────────────────────────
-
-export function StageLabelsEditor({ labels, save }: { labels: Record<string, string>; save: SaveFn }) {
-  const initial = Object.fromEntries(CASE_STAGES.map((s) => [s, labels[s] ?? STAGE_LABELS[s]]));
-  const [rows, setRows] = useState<Record<string, string>>(initial);
-  const { saving, saved, run } = useSaver(save);
-  return (
-    <CardShell
-      title="שמות השלבים בתיק"
-      sub="משנים רק את הניסוח. סדר השלבים ומה שקורה בכל שלב נשארים כמו שהם."
-      dirty={!same(rows, initial)}
-      saving={saving}
-      saved={saved}
-      onSave={() => run({ stageLabels: rows })}
-    >
-      <div className="edit-list">
-        {CASE_STAGES.map((stage, i) => (
-          <div key={stage} className="edit-row">
-            <span className="key">
-              <span className="num">{i + 1}.</span> {STAGE_LABELS[stage]}
-            </span>
-            <input
-              className="input"
-              value={rows[stage] ?? ''}
-              onChange={(e) => setRows((prev) => ({ ...prev, [stage]: e.target.value }))}
-              placeholder={STAGE_LABELS[stage]}
-              aria-label={`השם המוצג לשלב ${STAGE_LABELS[stage]}`}
-            />
           </div>
         ))}
       </div>

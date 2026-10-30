@@ -5,9 +5,11 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import { useSearchParams } from 'next/navigation';
 import { PUBLIC_CHANNEL_ID, REMINDER_CHANNEL_LABELS, type ChatMessage, type ReminderChannel } from '@/lib/domain';
 import { VoiceRecorder } from '@/components/voice-recorder';
+import { useConfig } from '@/components/config-provider';
+import { ModuleOff } from '@/components/module-off';
 import { useSession } from '@/components/session-provider';
 import { PageHead, initials } from '@/components/ui/bits';
-import { IconArrowRight, IconBell, IconClock, IconDownload, IconFile, IconImage, IconSend, IconTrash, IconX } from '@/components/ui/icons';
+import { IconArrowRight, IconChat, IconBell, IconClock, IconDownload, IconFile, IconImage, IconSend, IconTrash, IconX } from '@/components/ui/icons';
 
 type Conversation = {
   id: string;
@@ -456,6 +458,8 @@ function ChatPageInner() {
 }
 
 export default function ChatPage() {
+  const on = useConfig().modules.chat;
+  if (!on) return <ModuleOff icon={<IconChat size={30} />} title="צ׳אט הצוות כבוי" />;
   return (
     <Suspense>
       <ChatPageInner />

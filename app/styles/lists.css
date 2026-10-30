@@ -155,6 +155,7 @@
 .case-row { color: inherit; }
 .case-stage { font-size: 13.5px; font-weight: 600; display: block; }
 .co-name { font-weight: 700; font-size: 12px; }
+.case-extra { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pay { font-weight: 600; }
 .pay-paid { color: var(--green); }
 .pay-partial { color: var(--amber); }

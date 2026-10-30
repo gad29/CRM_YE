@@ -1,0 +1,156 @@
+/* ──────────────────────────────────────────────────────────────────────────
+   Settings editors: the pipeline, client / case fields, interface wording.
+   (Lists of names and the general card live in tools.css.)
+   ────────────────────────────────────────────────────────────────────────── */
+
+.settings-wrap { min-width: 0; }
+/* Ten tabs: they scroll sideways on a phone; the page itself never does. */
+.settings-tabs { max-width: 100%; margin-inline: -2px; padding-inline: 2px; scroll-snap-type: x proximity; }
+.settings-tabs .tab { scroll-snap-align: start; }
+.settings-blocked { color: var(--red); font-weight: 600; }
+.ask-text { margin: 0; line-height: 1.6; }
+
+.is-hidden > :first-child .input,
+.edit-row.is-hidden .input { color: var(--muted); background: var(--surface-2); }
+
+/* Reorder arrows: one chevron points down, the other is flipped. */
+.reorder { display: inline-flex; gap: 2px; }
+.reorder .flip svg { transform: rotate(180deg); }
+.icon-button:disabled { opacity: 0.35; pointer-events: none; }
+.icon-button.locked { color: var(--muted); cursor: help; opacity: 0.7; }
+.icon-button.locked:hover { background: transparent; }
+
+/* ── Pipeline ─────────────────────────────────────────────────────────────── */
+
+.pipeline { display: grid; gap: 18px; }
+.pipeline-phase { display: grid; gap: 10px; min-width: 0; }
+.pipeline-phase + .pipeline-phase { padding-top: 18px; border-top: 1px solid var(--line); }
+.pipeline-phase-head { display: flex; align-items: center; gap: 10px; }
+.pipeline-num {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: 700;
+  font-size: 13px;
+}
+.pipeline-phase-name.input { font-weight: 700; font-size: 15px; max-width: 320px; flex: 1; }
+
+.stage-list,
+.field-edit-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; min-width: 0; }
+.stage-list { padding-inline-start: 38px; position: relative; }
+/* A thin rail joining the stages of a phase, like the journey bar on a case. */
+.stage-list::before {
+  content: '';
+  position: absolute;
+  inset-inline-start: 13px;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--line);
+}
+
+.stage-edit,
+.field-edit {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  min-width: 0;
+  transition: border-color var(--fast) var(--ease), background var(--fast) var(--ease);
+}
+.stage-edit:focus-within,
+.field-edit:focus-within { border-color: var(--line-strong); }
+.stage-edit.is-hidden,
+.field-edit.is-hidden { background: var(--surface-2); border-style: dashed; }
+
+.stage-edit-main,
+.field-edit-main { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.stage-edit-main .input,
+.field-edit-main .input { flex: 1; min-width: 0; }
+.stage-edit-tools { display: inline-flex; align-items: center; gap: 2px; margin-inline-start: auto; flex-shrink: 0; }
+.stage-count { background: var(--accent-soft); color: var(--accent-strong); border-color: transparent; }
+
+.stage-edit-more { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; }
+.stage-edit-more .input,
+.stage-edit-more .select { height: 36px; font-size: 13px; }
+.stage-edit-more .select { max-width: 200px; }
+.pipeline-add { justify-self: start; margin-inline-start: 34px; }
+
+/* ── Fields ───────────────────────────────────────────────────────────────── */
+
+.field-type { flex-shrink: 0; }
+.field-type-select.select { width: auto; max-width: 150px; height: 36px; font-size: 13px; flex-shrink: 0; }
+.field-edit-more { display: flex; align-items: center; gap: 8px 16px; flex-wrap: wrap; }
+.field-edit-more .segmented button { height: 28px; padding: 0 11px; font-size: 13px; }
+
+.option-chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding-top: 2px; }
+.option-chip { padding-inline-end: 4px; }
+.option-chip button {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+}
+.option-chip button:hover { background: var(--line); color: var(--ink); }
+.option-input.input { width: 190px; height: 32px; font-size: 13px; }
+
+/* ── Interface tab ────────────────────────────────────────────────────────── */
+
+.module-list { display: grid; gap: 4px; }
+.module-row { display: flex; gap: 12px; align-items: flex-start; padding: 10px 4px; cursor: pointer; border-radius: var(--radius-s); }
+.module-row + .module-row { border-top: 1px solid var(--line); }
+.module-row input { width: 17px; height: 17px; margin-top: 2px; accent-color: var(--accent); flex-shrink: 0; }
+.module-row > span { display: grid; gap: 2px; }
+.module-off { line-height: 1.5; }
+
+.tray-edit .input:first-child { flex: 0 1 180px; }
+
+.texts-search { position: relative; display: block; margin-bottom: 6px; }
+.texts-search svg { position: absolute; inset-inline-start: 12px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
+.texts-search .input { padding-inline-start: 36px; width: 100%; }
+
+.texts-group { margin-top: 18px; }
+.texts-group-title { margin: 0 0 6px; font-size: 13px; font-weight: 700; color: var(--ink-2); }
+.texts-list { display: grid; }
+.text-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  gap: 4px 14px;
+  align-items: center;
+  padding: 9px 0;
+  border-top: 1px solid var(--line);
+}
+.text-row-about { display: grid; gap: 1px; min-width: 0; }
+.text-row-default { font-size: 14px; color: var(--ink); overflow-wrap: anywhere; }
+.text-row.is-own .text-row-default { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--line-strong); }
+.text-row-edit { display: flex; gap: 6px; align-items: center; min-width: 0; }
+.text-row-edit .input { flex: 1; min-width: 0; height: 36px; }
+.text-row-warn { grid-column: 1 / -1; margin: 0; }
+
+@media (max-width: 720px) {
+  .stage-list { padding-inline-start: 0; }
+  .stage-list::before { display: none; }
+  .pipeline-add { margin-inline-start: 0; }
+  .stage-edit-more { grid-template-columns: minmax(0, 1fr); }
+  .stage-edit-more .select { max-width: none; }
+  .stage-edit-main,
+  .field-edit-main { flex-wrap: wrap; }
+  .stage-edit-main .input,
+  .field-edit-main .input { flex-basis: 100%; }
+  .text-row { grid-template-columns: minmax(0, 1fr); }
+  .tray-edit { flex-wrap: wrap; }
+  .tray-edit .input { flex-basis: 100% !important; }
+  .option-input.input { width: 100%; }
+}

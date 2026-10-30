@@ -6,6 +6,7 @@
 // lib/task-watch.ts). Open reminders show next to what they are about.
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useConfig } from '@/components/config-provider';
 import { useSession } from '@/components/session-provider';
 import { Field } from '@/components/ui/bits';
 import { IconBell, IconCheck, IconClock } from '@/components/ui/icons';
@@ -42,6 +43,7 @@ const CHANGED = 'crmye:reminders-changed';
 
 /** Open reminders about one case or client; refreshes when any reminder changes. */
 export function useReminders(scope: { caseId?: string; clientId?: string }) {
+  const tasksOn = useConfig().modules.tasks;
   const [reminders, setReminders] = useState<OpenReminder[]>([]);
   const query = scope.caseId ? `caseId=${encodeURIComponent(scope.caseId)}` : scope.clientId ? `clientId=${encodeURIComponent(scope.clientId)}` : '';
   const load = useCallback(async () => {
@@ -56,7 +58,8 @@ export function useReminders(scope: { caseId?: string; clientId?: string }) {
     window.addEventListener(CHANGED, load);
     return () => window.removeEventListener(CHANGED, load);
   }, [load]);
-  return { reminders, reload: load };
+  // With tasks switched off in Settings there are no reminders to show.
+  return { reminders: tasksOn ? reminders : [], reload: load };
 }
 
 export function announceRemindersChanged() {
@@ -296,6 +299,7 @@ export function RemindButton({
   onCreated?: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  if (!useConfig().modules.tasks) return null;
   return (
     <>
       {variant === 'icon' ? (
@@ -315,6 +319,8 @@ export function RemindButton({
 
 /** Small "reminder set" chip next to the thing it is about. */
 export function ReminderChip({ reminder }: { reminder: OpenReminder }) {
+  const tasksOn = useConfig().modules.tasks;
+  if (!tasksOn) return null;
   const overdue = reminder.dueAt && new Date(reminder.dueAt).getTime() < Date.now();
   return (
     <Link href={'/tasks' as never} className={`reminder-chip ${overdue ? 'due' : ''}`} title={`${reminder.title}${reminder.assigneeName ? ` · ${reminder.assigneeName}` : ''}`}>
@@ -327,7 +333,8 @@ export function ReminderChip({ reminder }: { reminder: OpenReminder }) {
 /** Card listing the open reminders about a case or client, with "done". */
 export function RemindersCard({ reminders, onChanged }: { reminders: OpenReminder[]; onChanged?: () => void }) {
   const toast = useToast();
-  if (!reminders.length) return null;
+  const tasksOn = useConfig().modules.tasks;
+  if (!reminders.length || !tasksOn) return null;
   async function done(id: string) {
     const res = await fetch(`/api/tasks/${id}`, {
       method: 'PATCH',

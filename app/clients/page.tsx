@@ -4,6 +4,9 @@ import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { Suspense, useEffect, useMemo, useState } from 'react';
 import { useNewFlow } from '@/components/app-shell';
+import { useConfig, useText } from '@/components/config-provider';
+import { formatFieldValue } from '@/components/field-input';
+import { fieldValue, type FieldDef } from '@/lib/domain';
 import { Empty, PageHead, Segmented, shekel } from '@/components/ui/bits';
 import { IconChevronLeft, IconClients, IconFlag, IconPlus, IconSearch, IconX } from '@/components/ui/icons';
 import { letters } from './letters';
@@ -16,6 +19,8 @@ type ClientRow = {
   idNumber?: string;
   email?: string;
   city?: string;
+  address?: string;
+  extra?: Record<string, string>;
   caseCount: number;
   openCaseCount: number;
   missingItems: number;
@@ -39,10 +44,27 @@ const CHIPS: { id: Chip; label: string }[] = [
 
 const digits = (v?: string) => (v || '').replace(/\D/g, '');
 
+/** One detail on a client row: phone bare, the ID with its prefix, added fields as "label value". */
+function RowDetail({ field, value }: { field: FieldDef; value: string }) {
+  if (field.type === 'phone' || field.type === 'email') return <span className="ltr">{value}</span>;
+  if (field.key === 'idNumber') return <span>ת״ז <span className="ltr">{value}</span></span>;
+  if (field.builtIn) return <span>{value}</span>;
+  return (
+    <span>
+      <span className="muted">{field.label}</span> {value}
+    </span>
+  );
+}
+
 
 function ClientsInner() {
   const params = useSearchParams();
   const openWizard = useNewFlow();
+  const config = useConfig();
+  const t = useText();
+  // Details shown on each row, and every shown detail the search looks through.
+  const rowFields = config.clientFields.filter((f) => f.visible && f.inList && f.type !== 'longtext');
+  const searchFields = config.clientFields.filter((f) => f.visible && f.key !== 'phone' && f.key !== 'idNumber');
   const [clients, setClients] = useState<ClientRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
@@ -108,11 +130,11 @@ function ClientsInner() {
       (c) =>
         c.fullName.toLowerCase().includes(q) ||
         (qDigits.length >= 3 && (digits(c.phone).includes(qDigits) || digits(c.idNumber).includes(qDigits))) ||
-        (c.email || '').toLowerCase().includes(q) ||
-        (c.city || '').toLowerCase().includes(q) ||
+        searchFields.some((f) => fieldValue(c, f.key).toLowerCase().includes(q)) ||
         c.id.toLowerCase() === q,
     );
-  }, [clients, query]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clients, query, config.clientFields]);
 
   const shown = useMemo(() => {
     const list = searched.filter((c) => matchesChip(c, chip));
@@ -130,11 +152,11 @@ function ClientsInner() {
     <div>
       <PageHead
         eyebrow="לקוחות"
-        title="הלקוחות"
+        title={t('client.listTitle')}
         sub={loading ? 'טוען…' : `${clients.length} לקוחות · ${clients.filter((c) => c.openCaseCount > 0).length} עם תיק פעיל`}
         actions={
           <button type="button" className="button" onClick={() => openWizard({ mode: 'client' })}>
-            <IconPlus size={16} /> לקוח חדש
+            <IconPlus size={16} /> {t('btn.newClient')}
           </button>
         }
       />
@@ -147,7 +169,7 @@ function ClientsInner() {
               type="search"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="שם, טלפון, תעודת זהות, אימייל או עיר"
+              placeholder={t('client.searchPlaceholder')}
               aria-label="חיפוש לקוחות"
               autoFocus
             />
@@ -225,9 +247,10 @@ function ClientsInner() {
                   {dupes.has(c.id) && <span className="chip amber" title="טלפון או תעודת זהות זהים ללקוח אחר">כפילות?</span>}
                 </span>
                 <span className="list-sub client-meta">
-                  <span className="ltr">{c.phone}</span>
-                  {c.idNumber && <span>ת״ז <span className="ltr">{c.idNumber}</span></span>}
-                  {c.city && <span>{c.city}</span>}
+                  {rowFields.map((f) => {
+                    const value = formatFieldValue(f, c);
+                    return value ? <RowDetail key={f.key} field={f} value={value} /> : null;
+                  })}
                 </span>
               </span>
               <span className="client-stats">

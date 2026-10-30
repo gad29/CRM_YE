@@ -1,25 +1,39 @@
 'use client';
 
 import '@/app/styles/tools.css';
+import '@/app/styles/settings.css';
 import { Suspense, useCallback, useEffect, useState } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import type { AppConfig } from '@/lib/domain';
 import { useConfigRefresh } from '@/components/config-provider';
 import { PageHead } from '@/components/ui/bits';
 import { useToast } from '@/components/ui/toast';
-import { BlankContractCard, GeneralEditor, OptionListEditor, StageLabelsEditor, TemplateEditor, type SaveFn } from './editors';
+import { BlankContractCard, GeneralEditor, OptionListEditor, TemplateEditor, type SaveFn } from './editors';
+import { FieldsEditor } from './fields-editor';
 import { ImportCard } from './import-card';
+import { ModulesEditor, TextsEditor, TraysEditor } from './interface-editor';
+import { PipelineEditor } from './pipeline-editor';
 
 const TABS = [
   { id: 'business', label: 'העסק' },
+  { id: 'stages', label: 'שלבים' },
+  { id: 'client-fields', label: 'פרטי לקוח' },
+  { id: 'case-fields', label: 'פרטי תיק' },
   { id: 'companies', label: 'חברות' },
   { id: 'documents', label: 'מסמכים' },
-  { id: 'process', label: 'שלבים ומשרדים' },
+  { id: 'offices', label: 'משרדים' },
   { id: 'payments', label: 'תשלומים' },
+  { id: 'interface', label: 'ממשק' },
   { id: 'import', label: 'ייבוא' },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
+
+/** Links saved before the tabs were split. */
+const OLD_TABS: Record<string, TabId> = { process: 'stages' };
+
+type Usage = { stages: Record<string, number>; clientFields: Record<string, number>; caseFields: Record<string, number> };
+const NO_USAGE: Usage = { stages: {}, clientFields: {}, caseFields: {} };
 
 function SettingsInner() {
   const refresh = useConfigRefresh();
@@ -27,17 +41,26 @@ function SettingsInner() {
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
-  const tabParam = params.get('tab');
-  const tab: TabId = TABS.some((t) => t.id === tabParam) ? (tabParam as TabId) : 'business';
+  const tabParam = params.get('tab') ?? '';
+  const tab: TabId = TABS.some((t) => t.id === tabParam) ? (tabParam as TabId) : (OLD_TABS[tabParam] ?? 'business');
   const [config, setConfig] = useState<AppConfig | null>(null);
+  const [usage, setUsage] = useState<Usage>(NO_USAGE);
   const [loadError, setLoadError] = useState(false);
+
+  const loadUsage = useCallback(() => {
+    fetch('/api/config/usage')
+      .then((r) => r.json())
+      .then((d) => d.ok && setUsage(d.data))
+      .catch(() => null);
+  }, []);
 
   useEffect(() => {
     fetch('/api/config')
       .then((r) => r.json())
       .then((d) => (d.ok ? setConfig(d.data) : setLoadError(true)))
       .catch(() => setLoadError(true));
-  }, []);
+    loadUsage();
+  }, [loadUsage]);
 
   const save: SaveFn = useCallback(
     async (patch) => {
@@ -54,13 +77,14 @@ function SettingsInner() {
         }
         setConfig(d.data);
         refresh();
+        if (patch.stages || patch.clientFields || patch.caseFields) loadUsage();
         return true;
       } catch {
         toast('אין חיבור לשרת — לא נשמר', 'error');
         return false;
       }
     },
-    [refresh, toast],
+    [refresh, toast, loadUsage],
   );
 
   function selectTab(id: TabId) {
@@ -72,9 +96,9 @@ function SettingsInner() {
 
   return (
     <div className="settings-wrap">
-      <PageHead title="הגדרות" sub="השמות, החברות, המסמכים והשלבים שהמערכת משתמשת בהם. שינוי כאן חל מיד על כל הצוות." />
+      <PageHead title="הגדרות" sub="השלבים, הפרטים, השמות והכפתורים שהמערכת משתמשת בהם. שינוי כאן חל מיד על כל הצוות." />
 
-      <div className="tabs" role="tablist" aria-label="אזורי ההגדרות">
+      <div className="tabs settings-tabs" role="tablist" aria-label="אזורי ההגדרות">
         {TABS.map((t) => (
           <button key={t.id} type="button" role="tab" aria-selected={tab === t.id} className={`tab ${tab === t.id ? 'on' : ''}`} onClick={() => selectTab(t.id)}>
             {t.label}
@@ -100,6 +124,18 @@ function SettingsInner() {
               save={save}
             />
           )}
+          {tab === 'stages' && (
+            <PipelineEditor
+              key={k([config.stages, config.phases])}
+              stages={config.stages}
+              phases={config.phases}
+              trays={config.trays}
+              usage={usage.stages}
+              save={save}
+            />
+          )}
+          {tab === 'client-fields' && <FieldsEditor key={k(config.clientFields)} kind="client" fields={config.clientFields} usage={usage.clientFields} save={save} />}
+          {tab === 'case-fields' && <FieldsEditor key={k(config.caseFields)} kind="case" fields={config.caseFields} usage={usage.caseFields} save={save} />}
           {tab === 'companies' && (
             <OptionListEditor
               key={k(config.companies)}
@@ -120,22 +156,19 @@ function SettingsInner() {
               <BlankContractCard />
             </>
           )}
-          {tab === 'process' && (
-            <>
-              <StageLabelsEditor key={k(config.stageLabels)} labels={config.stageLabels} save={save} />
-              <OptionListEditor
-                key={k(config.offices)}
-                title="משרדי ממשלה"
-                sub="איך כל משרד נקרא במערכת. אפשר לשנות את השם; משרד שאינו ברשימה נבחר בתיק כ&quot;אחר&quot; עם שם חופשי."
-                items={config.offices}
-                keyPrefix="office"
-                field="offices"
-                fixed
-                save={save}
-                addLabel="הוספת משרד"
-                placeholder="שם המשרד"
-              />
-            </>
+          {tab === 'offices' && (
+            <OptionListEditor
+              key={k(config.offices)}
+              title="משרדי ממשלה"
+              sub="איך כל משרד נקרא במערכת. אפשר לשנות את השם; משרד שאינו ברשימה נבחר בתיק כ&quot;אחר&quot; עם שם חופשי."
+              items={config.offices}
+              keyPrefix="office"
+              field="offices"
+              fixed
+              save={save}
+              addLabel="הוספת משרד"
+              placeholder="שם המשרד"
+            />
           )}
           {tab === 'payments' && (
             <OptionListEditor
@@ -149,6 +182,13 @@ function SettingsInner() {
               addLabel="הוספת אמצעי"
               placeholder="למשל: העברה בנקאית"
             />
+          )}
+          {tab === 'interface' && (
+            <>
+              <ModulesEditor key={k(config.modules)} modules={config.modules} save={save} />
+              <TraysEditor key={k(config.trays)} trays={config.trays} save={save} />
+              <TextsEditor key={k(config.texts)} texts={config.texts} save={save} />
+            </>
           )}
           {tab === 'import' && <ImportCard />}
         </div>

@@ -4,14 +4,16 @@
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import { useNewFlow } from '@/components/app-shell';
+import { useText } from '@/components/config-provider';
 import { useToast } from '@/components/ui/toast';
 import { IconCheck, IconPlus } from '@/components/ui/icons';
 
 export function TodayNewClient() {
   const openWizard = useNewFlow();
+  const t = useText();
   return (
     <button type="button" className="button button-compact" onClick={() => openWizard({ mode: 'client' })}>
-      <IconPlus size={16} /> לקוח חדש
+      <IconPlus size={16} /> {t('btn.newClient')}
     </button>
   );
 }

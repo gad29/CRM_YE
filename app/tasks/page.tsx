@@ -5,6 +5,8 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { REMINDER_CHANNEL_LABELS, TASK_PRIORITY_LABELS, watchHint, type ReminderChannel, type TaskPriority, type TaskWatchKind } from '@/lib/domain';
+import { useConfig } from '@/components/config-provider';
+import { ModuleOff } from '@/components/module-off';
 import { useSession } from '@/components/session-provider';
 import { Empty, Field, PageHead, Segmented } from '@/components/ui/bits';
 import { Modal } from '@/components/ui/overlay';
@@ -551,6 +553,8 @@ function TasksPageInner() {
 }
 
 export default function TasksPage() {
+  const on = useConfig().modules.tasks;
+  if (!on) return <ModuleOff icon={<IconTasks size={30} />} title="המשימות והתזכורות כבויות" />;
   return (
     <Suspense>
       <TasksPageInner />

@@ -4,8 +4,10 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { use, useCallback, useEffect, useState, type CSSProperties } from 'react';
 import { DocumentsPanel, type DocumentItem } from '@/components/documents-panel';
-import { useConfig } from '@/components/config-provider';
+import { useConfig, useText } from '@/components/config-provider';
 import { useNewFlow } from '@/components/app-shell';
+import { formatFieldValue, formFields } from '@/components/field-input';
+import { ClientFieldInput, clientPayload } from '@/components/new-case-wizard';
 import { useToast } from '@/components/ui/toast';
 import { Menu, Modal } from '@/components/ui/overlay';
 import { Empty, Field, formatDate, shekel, timeAgo } from '@/components/ui/bits';
@@ -27,19 +29,21 @@ import {
   IconWhatsapp,
 } from '@/components/ui/icons';
 import {
-  CLIENT_DETAIL_LABELS,
   PAYMENT_STATUS_LABELS,
   companyColor,
+  fieldValue,
   isUnderInvestigation,
   missingClientDetails,
   optionLabel,
+  phaseGroups,
+  phaseOfStage,
   stageLabelOf,
   type CaseStage,
   type DecisionStatus,
+  type FieldDef,
   type InvestigationOutcome,
   type PaymentMethod,
 } from '@/lib/domain';
-import { PHASES, phaseOf } from '@/components/case-trays';
 import { ReminderChip, RemindButton, RemindersCard, announceRemindersChanged, useReminders } from '@/components/reminders';
 import '../../styles/lists.css';
 
@@ -73,6 +77,7 @@ type ClientDetail = {
     address?: string;
     city?: string;
     notes?: string;
+    extra?: Record<string, string>;
     createdAt: string;
   };
   cases: CaseItem[];
@@ -92,21 +97,24 @@ function whatsappNumber(phone: string) {
   return d;
 }
 
-const EDIT_FIELDS = [
-  ['fullName', 'שם מלא', true],
-  ['phone', 'טלפון', true],
-  ['idNumber', 'תעודת זהות', false],
-  ['email', 'אימייל', false],
-  ['city', 'עיר', false],
-  ['address', 'כתובת', false],
-] as const;
-
-const LTR_FIELDS = new Set(['phone', 'idNumber', 'email']);
+/** One line of the client header: phone / email bare, the ID with its prefix, others as "label value". */
+function MetaItem({ field, value }: { field: FieldDef; value: string }) {
+  if (field.key === 'phone' || field.key === 'email' || field.type === 'phone' || field.type === 'email') return <span className="ltr">{value}</span>;
+  if (field.key === 'idNumber') return <span>ת״ז <span className="ltr">{value}</span></span>;
+  if (field.key === 'address' || field.key === 'city') return <span>{value}</span>;
+  return (
+    <span>
+      <span className="muted">{field.label}</span> {value}
+    </span>
+  );
+}
 
 export default function ClientPage({ params }: { params: Promise<{ clientId: string }> }) {
   const { clientId } = use(params);
   const router = useRouter();
   const toast = useToast();
+  const config = useConfig();
+  const t = useText();
   const openWizard = useNewFlow();
   const [data, setData] = useState<ClientDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -127,15 +135,17 @@ export default function ClientPage({ params }: { params: Promise<{ clientId: str
         setData(d.data);
         // Saving details may fill a gap a reminder was watching.
         announceRemindersChanged();
+        // A flat form: built-in columns and Settings-added fields side by side.
         const c = d.data.client;
         setForm({
           fullName: c.fullName,
-          phone: c.phone,
+          phone: c.phone || '',
           idNumber: c.idNumber || '',
           email: c.email || '',
           city: c.city || '',
           address: c.address || '',
           notes: c.notes || '',
+          ...(c.extra ?? {}),
         });
       })
       .catch(() => null)
@@ -167,7 +177,21 @@ export default function ClientPage({ params }: { params: Promise<{ clientId: str
   }
 
   const { client, cases, documents, payments, activity } = data;
-  const canManage = Boolean(data.canManagePayments);
+  // Payments switched off in Settings hide the tab and the balance chip.
+  const canManage = Boolean(data.canManagePayments) && config.modules.payments;
+  const shownFields = formFields(config.clientFields);
+  const valueOf = (f: FieldDef) => formatFieldValue(f, client);
+  // Header line: short details in the configured order, address + city joined, long texts below.
+  const metaFields = shownFields.filter((f) => f.type !== 'longtext' && f.key !== 'address' && f.key !== 'city' && valueOf(f));
+  const place = ['address', 'city']
+    .filter((k) => shownFields.some((f) => f.key === k))
+    .map((k) => fieldValue(client, k).trim())
+    .filter(Boolean)
+    .join(', ');
+  const longFields = shownFields.filter((f) => f.type === 'longtext' && valueOf(f));
+  const phone = shownFields.some((f) => f.key === 'phone') ? client.phone?.trim() : '';
+  const email = shownFields.some((f) => f.key === 'email') ? client.email?.trim() : '';
+  const emailShown = shownFields.some((f) => f.key === 'email');
   const totalBalance = cases.reduce((sum, c) => sum + c.finance.balance, 0);
   const openCases = cases.filter((c) => c.stage !== 'closed');
   const newCase = () => openWizard({ mode: 'case', clientId, clientName: client.fullName });
@@ -179,7 +203,7 @@ export default function ClientPage({ params }: { params: Promise<{ clientId: str
       const res = await fetch(`/api/clients/${clientId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
+        body: JSON.stringify(clientPayload(form, config.clientFields)),
       });
       const d = await res.json().catch(() => ({}));
       if (!res.ok || d.ok === false) {
@@ -195,20 +219,21 @@ export default function ClientPage({ params }: { params: Promise<{ clientId: str
     }
   }
 
-  const missingDetails = missingClientDetails(client);
+  const missingDetails = missingClientDetails(client, config.clientFields);
+  const missingLabels = missingDetails.map((k) => config.clientFields.find((f) => f.key === k)?.label ?? k).join(', ');
   const detailReminders = reminders.filter((r) => r.watchKind === 'client-details');
 
   const tabs: { id: Tab; label: string; count?: number; Icon: typeof IconFile }[] = [
-    { id: 'documents', label: 'מסמכים', count: documents.length, Icon: IconFile },
-    ...(canManage ? [{ id: 'payments' as Tab, label: 'תשלומים', count: payments.length, Icon: IconCoins }] : []),
-    { id: 'details', label: 'פרטים', Icon: IconPencil },
-    { id: 'history', label: 'היסטוריה', Icon: IconHistory },
+    { id: 'documents', label: t('client.tabDocuments'), count: documents.length, Icon: IconFile },
+    ...(canManage ? [{ id: 'payments' as Tab, label: t('client.tabPayments'), count: payments.length, Icon: IconCoins }] : []),
+    { id: 'details', label: t('client.tabDetails'), Icon: IconPencil },
+    { id: 'history', label: t('client.tabHistory'), Icon: IconHistory },
   ];
 
   return (
     <div>
       <Link href={'/clients' as never} className="back-link">
-        <IconArrowRight size={15} /> הלקוחות
+        <IconArrowRight size={15} /> {t('client.back')}
       </Link>
 
       <header className="client-head card">
@@ -218,31 +243,42 @@ export default function ClientPage({ params }: { params: Promise<{ clientId: str
             לקוח <span className="mono">{client.id}</span> · מאז {formatDate(client.createdAt)}
           </div>
           <h1 className="page-title" style={{ margin: '2px 0 6px' }}>{client.fullName}</h1>
-          <div className="client-meta">
-            <span className="ltr">{client.phone}</span>
-            {client.idNumber && <span>ת״ז <span className="ltr">{client.idNumber}</span></span>}
-            {client.email && <span className="ltr">{client.email}</span>}
-            {(client.city || client.address) && <span>{[client.address, client.city].filter(Boolean).join(', ')}</span>}
-          </div>
-          {client.notes && <p className="client-notes">{client.notes}</p>}
+          {(metaFields.length > 0 || place) && (
+            <div className="client-meta">
+              {metaFields.map((f) => (
+                <MetaItem key={f.key} field={f} value={valueOf(f)} />
+              ))}
+              {place && <span>{place}</span>}
+            </div>
+          )}
+          {longFields.map((f) => (
+            <p key={f.key} className="client-notes">
+              {f.key !== 'notes' && <span className="muted">{f.label}: </span>}
+              {valueOf(f)}
+            </p>
+          ))}
         </div>
         <div className="client-actions">
           <div className="row" style={{ gap: 6 }}>
-            <a className="icon-button contact" href={`tel:${client.phone}`} aria-label={`התקשרות ל${client.fullName}`} title="התקשרות">
-              <IconPhone size={18} />
-            </a>
-            <a
-              className="icon-button contact"
-              href={`https://wa.me/${whatsappNumber(client.phone)}`}
-              target="_blank"
-              rel="noreferrer"
-              aria-label="וואטסאפ"
-              title="וואטסאפ"
-            >
-              <IconWhatsapp size={18} />
-            </a>
-            {client.email ? (
-              <a className="icon-button contact" href={`mailto:${client.email}`} aria-label="אימייל" title="אימייל">
+            {phone && (
+              <>
+                <a className="icon-button contact" href={`tel:${phone}`} aria-label={`התקשרות ל${client.fullName}`} title="התקשרות">
+                  <IconPhone size={18} />
+                </a>
+                <a
+                  className="icon-button contact"
+                  href={`https://wa.me/${whatsappNumber(phone)}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  aria-label="וואטסאפ"
+                  title="וואטסאפ"
+                >
+                  <IconWhatsapp size={18} />
+                </a>
+              </>
+            )}
+            {!emailShown ? null : email ? (
+              <a className="icon-button contact" href={`mailto:${email}`} aria-label="אימייל" title="אימייל">
                 <IconMail size={18} />
               </a>
             ) : (
@@ -250,15 +286,15 @@ export default function ClientPage({ params }: { params: Promise<{ clientId: str
                 <IconMail size={18} />
               </button>
             )}
-            <RemindButton variant="icon" label="תזכורת על הלקוח" target={{ title: `לחזור ל${client.fullName}`, about: client.fullName, clientId: client.id }} />
+            <RemindButton variant="icon" label={t('client.remindAbout')} target={{ title: `לחזור ל${client.fullName}`, about: client.fullName, clientId: client.id }} />
             {canManage && (
               <Menu label="פעולות נוספות" trigger={<IconMore size={18} />}>
                 <button type="button" className="menu-item" onClick={() => setTab('details')}>
-                  <IconPencil size={15} /> עריכת פרטים
+                  <IconPencil size={15} /> {t('client.editDetails')}
                 </button>
                 <div className="menu-sep" />
                 <button type="button" className="menu-item danger" onClick={() => setConfirmDelete(true)}>
-                  <IconTrash size={15} /> מחיקת הלקוח
+                  <IconTrash size={15} /> {t('client.delete')}
                 </button>
               </Menu>
             )}
@@ -274,20 +310,20 @@ export default function ClientPage({ params }: { params: Promise<{ clientId: str
       {missingDetails.length > 0 && (
         <div className="gap-strip">
           <span>
-            <span className="strong">חסרים פרטים:</span> {missingDetails.map((f) => CLIENT_DETAIL_LABELS[f]).join(', ')}
+            <span className="strong">{t('client.missingDetails')}</span> {missingLabels}
           </span>
           {detailReminders.map((r) => (
             <ReminderChip key={r.id} reminder={r} />
           ))}
           <span className="spacer" />
           <button type="button" className="button button-compact button-secondary" onClick={() => setTab('details')}>
-            <IconPencil size={15} /> השלמה עכשיו
+            <IconPencil size={15} /> {t('client.completeNow')}
           </button>
           {detailReminders.length === 0 && (
             <RemindButton
-              label="תזכורת להשלים"
+              label={t('client.remindComplete')}
               target={{
-                title: `להשלים ${missingDetails.map((f) => CLIENT_DETAIL_LABELS[f]).join(', ')} — ${client.fullName}`,
+                title: `להשלים ${missingLabels} — ${client.fullName}`,
                 about: client.fullName,
                 clientId: client.id,
                 watch: { kind: 'client-details', fields: missingDetails },
@@ -303,7 +339,7 @@ export default function ClientPage({ params }: { params: Promise<{ clientId: str
 
       <section className="client-cases">
         <div className="section-title">
-          <h2>תיקים</h2>
+          <h2>{t('client.casesTitle')}</h2>
           <span className="muted small">
             {cases.length === 0 ? 'אין תיקים' : `${openCases.length} פעילים${cases.length > openCases.length ? ` · ${cases.length - openCases.length} סגורים` : ''}`}
           </span>
@@ -313,18 +349,18 @@ export default function ClientPage({ params }: { params: Promise<{ clientId: str
             <CaseFolder key={c.id} c={c} />
           ))}
           <button type="button" className="folder folder-new" onClick={newCase}>
-            <span className="folder-tab none">תיק חדש</span>
+            <span className="folder-tab none">{t('btn.newCase')}</span>
             <IconPlus size={20} />
-            <span>{cases.length === 0 ? 'פתיחת התיק הראשון של הלקוח' : 'פתיחת תיק נוסף'}</span>
+            <span>{cases.length === 0 ? t('client.openFirstCase') : t('client.openAnotherCase')}</span>
           </button>
         </div>
       </section>
 
       <div className="tabs" role="tablist" style={{ marginTop: 28 }}>
-        {tabs.map((t) => (
-          <button key={t.id} type="button" role="tab" aria-selected={tab === t.id} className={`tab ${tab === t.id ? 'on' : ''}`} onClick={() => setTab(t.id)}>
-            <t.Icon size={15} /> {t.label}
-            {t.count ? <span className="count">{t.count}</span> : null}
+        {tabs.map((item) => (
+          <button key={item.id} type="button" role="tab" aria-selected={tab === item.id} className={`tab ${tab === item.id ? 'on' : ''}`} onClick={() => setTab(item.id)}>
+            <item.Icon size={15} /> {item.label}
+            {item.count ? <span className="count">{item.count}</span> : null}
           </button>
         ))}
       </div>
@@ -341,29 +377,20 @@ export default function ClientPage({ params }: { params: Promise<{ clientId: str
         <form className="card" style={{ maxWidth: 720 }} onSubmit={saveDetails}>
           <div className="card-head">
             <div>
-              <div className="card-title">פרטי הלקוח</div>
-              <div className="card-sub">הטלפון והאימייל משמשים לשליחת מסמכים ותזכורות ללקוח.</div>
+              <div className="card-title">{t('client.detailsTitle')}</div>
+              <div className="card-sub">{t('client.detailsSub')}</div>
             </div>
           </div>
           <div className="form-grid">
-            {EDIT_FIELDS.map(([key, label, required]) => (
-              <Field key={key} label={label} required={required}>
-                <input
-                  value={form[key] ?? ''}
-                  onChange={(e) => setForm({ ...form, [key]: e.target.value })}
-                  required={required}
-                  type={key === 'email' ? 'email' : key === 'phone' ? 'tel' : 'text'}
-                  dir={LTR_FIELDS.has(key) ? 'ltr' : undefined}
-                  style={LTR_FIELDS.has(key) ? { textAlign: 'right' } : undefined}
-                />
-              </Field>
-            ))}
-            <Field label="הערות" full>
-              <textarea rows={3} value={form.notes ?? ''} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+            <Field label={t('client.fullName')} required>
+              <input value={form.fullName ?? ''} onChange={(e) => setForm({ ...form, fullName: e.target.value })} required />
             </Field>
+            {shownFields.map((f) => (
+              <ClientFieldInput key={f.key} field={f} value={form[f.key] ?? ''} onChange={(v) => setForm((prev) => ({ ...prev, [f.key]: v }))} />
+            ))}
           </div>
           <div className="row" style={{ marginTop: 16 }}>
-            <button className="button" type="submit" disabled={saving}>{saving ? 'שומר…' : 'שמירת הפרטים'}</button>
+            <button className="button" type="submit" disabled={saving}>{saving ? 'שומר…' : t('client.saveDetails')}</button>
           </div>
         </form>
       )}
@@ -407,8 +434,9 @@ function CaseFolder({ c }: { c: CaseItem }) {
   const config = useConfig();
   const color = companyColor(config, c.company);
   const flagged = Boolean(c.troubleFlag) || isUnderInvestigation(c);
-  const phase = phaseOf(c.stage);
-  const phaseIndex = PHASES.findIndex((p) => p.id === phase);
+  const phases = phaseGroups(config);
+  const phase = phaseOfStage(config, c.stage);
+  const phaseIndex = phases.findIndex((p) => p.id === phase);
   const closed = c.stage === 'closed';
   return (
     <Link
@@ -427,8 +455,8 @@ function CaseFolder({ c }: { c: CaseItem }) {
         </div>
         <span className="mono tiny muted">{c.id}</span>
       </div>
-      <div className="phase-track" aria-label={`שלב ${phaseIndex + 1} מתוך ${PHASES.length}`}>
-        {PHASES.map((p, i) => (
+      <div className="phase-track" aria-label={`שלב ${phaseIndex + 1} מתוך ${phases.length}`}>
+        {phases.map((p, i) => (
           <span key={p.id} className={i < phaseIndex || closed ? 'done' : i === phaseIndex ? 'now' : ''} />
         ))}
       </div>

@@ -3,14 +3,15 @@
 // One case, top to bottom in the order the work happens: who and what (header),
 // where it stands (journey), what to do now (next step), then the material —
 // documents, payments, details and history.
-import { PHASES } from '@/components/case-trays';
+import { isPaymentStage } from '@/components/case-trays';
+import { FieldInput, formatFieldValue } from '@/components/field-input';
 import { ReminderChip, RemindButton, RemindersCard, announceRemindersChanged, useReminders, type OpenReminder, type ReminderTarget } from '@/components/reminders';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { use, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { Fragment, use, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import '@/app/styles/case.css';
 import { DocumentsPanel, type DocumentItem } from '@/components/documents-panel';
-import { useConfig } from '@/components/config-provider';
+import { useConfig, useText } from '@/components/config-provider';
 import { useSession } from '@/components/session-provider';
 import { useNewFlow } from '@/components/app-shell';
 import { Empty, Field, Segmented, Stamp, StampText, formatDate, shekel, timeAgo } from '@/components/ui/bits';
@@ -39,14 +40,21 @@ import {
 import {
   BLANK_CONTRACT_CODE,
   CASE_KIND_LABELS,
-  CASE_STAGES,
   CHECKLIST_STATUS_LABELS,
   INVESTIGATION_OUTCOME_LABELS,
   PAYMENT_STATUS_LABELS,
   companyColor,
+  isBuiltInStage,
   isUnderInvestigation,
+  nextStage,
   optionLabel,
+  phaseGroups,
+  resolveStage,
+  stageDef,
+  stageDefs,
   stageLabelOf,
+  stageOrder,
+  type FieldDef,
   type CaseKind,
   type CaseStage,
   type ChecklistStatus,
@@ -90,6 +98,8 @@ type CaseDetail = {
     closedAt?: string;
     missingItems: number;
     finance: { fee: number; paid: number; balance: number; status: 'paid' | 'partial' | 'unpaid'; overridden?: boolean };
+    /** Values of case fields added in Settings. */
+    extra?: Record<string, string>;
   };
   client: { id: string; fullName: string; phone: string; email?: string } | null;
   documents: DocumentItem[];
@@ -133,6 +143,7 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
   const { caseId } = use(params);
   const router = useRouter();
   const config = useConfig();
+  const t = useText();
   const toast = useToast();
   const { me } = useSession();
   const openNew = useNewFlow();
@@ -198,7 +209,25 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
   const c = data.case;
   const client = data.client;
   const isAdmin = Boolean(me?.isAdmin ?? data.canAssign);
-  const stageIndex = CASE_STAGES.indexOf(c.stage);
+  const stageIndex = stageOrder(config, c.stage);
+  const shownStages = stageDefs(config).filter((s) => !s.hidden);
+  /** The next stage shown in Settings (undefined once closed). */
+  const forward = nextStage(config, c.stage);
+  const stageHint = stageDef(config, c.stage)?.hint;
+  const paymentsOn = config.modules.payments;
+  const canPay = Boolean(data.canManagePayments) && paymentsOn;
+  const fieldShown = (key: string) => config.caseFields.find((f) => f.key === key)?.visible !== false;
+  const fieldLabel = (key: string) => config.caseFields.find((f) => f.key === key)?.label ?? key;
+  // Fields added in Settings and marked "show in lists" appear under the case title.
+  const headerFields = config.caseFields
+    .filter((f) => !f.builtIn && f.visible && f.inList)
+    .map((f) => ({ key: f.key, label: f.label, value: formatFieldValue(f, c) }))
+    .filter((f) => f.value);
+  /** Where a jump to a built-in stage lands when Settings hid it (never the stage the case is already in). */
+  const jump = (target: CaseStage): CaseStage => {
+    const to = resolveStage(config, target);
+    return to === c.stage ? nextStage(config, c.stage) ?? to : to;
+  };
   const underInvestigation = isUnderInvestigation(c);
   const rejected = c.investigationOutcome === 'rejected';
   const stageName = (stage: CaseStage) => stageLabelOf(config, stage);
@@ -269,13 +298,13 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
   /** Forward moves apply at once; going back or closing asks first. */
   function requestStage(stage: CaseStage) {
     if (stage === c.stage) return;
-    const back = CASE_STAGES.indexOf(stage) < stageIndex;
+    const back = stageOrder(config, stage) < stageIndex;
     if (!back && stage !== 'closed') {
       void moveTo(stage);
       return;
     }
     setAsk({
-      title: stage === 'closed' ? 'סגירת התיק' : 'החזרת התיק לשלב קודם',
+      title: stage === 'closed' ? t('case.closeCase') : 'החזרת התיק לשלב קודם',
       body:
         stage === 'closed' ? (
           <p className="ask-text">התיק יסומן כסגור ויירד מהרשימות הפעילות. אפשר לפתוח אותו מחדש בכל עת.</p>
@@ -284,30 +313,34 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
             התיק יחזור מ&quot;{stageName(c.stage)}&quot; ל&quot;{stageName(stage)}&quot;.
           </p>
         ),
-      confirmLabel: stage === 'closed' ? 'סגירת התיק' : `החזרה ל${stageName(stage)}`,
+      confirmLabel: stage === 'closed' ? t('case.closeCase') : `החזרה ל${stageName(stage)}`,
       run: async () => Boolean(await moveTo(stage)),
     });
   }
 
+  // Office answers jump to fixed built-in stages; a stage hidden in Settings passes on to the next shown one.
+
   function officeApproved() {
+    const to = jump('awaiting-payment');
     setAsk({
-      title: 'המשרד אישר את הבקשה',
-      body: <p className="ask-text">התיק יעבור ל&quot;{stageName('awaiting-payment')}&quot; ויסומן כמאושר.</p>,
-      confirmLabel: 'אישור — מעבר לתשלום',
-      run: async () => Boolean(await moveTo('awaiting-payment', { decisionStatus: 'approved', investigationOutcome: '' })),
+      title: t('case.ask.approvedTitle'),
+      body: <p className="ask-text">התיק יעבור ל&quot;{stageName(to)}&quot; ויסומן כמאושר.</p>,
+      confirmLabel: to === 'awaiting-payment' ? t('case.ask.approvedConfirm') : t('case.advance', { stage: stageName(to) }),
+      run: async () => Boolean(await moveTo(to, { decisionStatus: 'approved', investigationOutcome: '' })),
     });
   }
 
   function officeNeedsMore() {
+    const to = resolveStage(config, 'action-required');
     setAsk({
-      title: 'המשרד ביקש השלמה',
+      title: t('case.ask.needsMoreTitle'),
       confirmLabel: 'שמירה',
-      input: { label: 'מה המשרד ביקש להשלים?', placeholder: 'לדוגמה: תלושי שכר של 3 החודשים האחרונים', initial: c.stage === 'action-required' ? c.nextAction : '', multiline: true },
+      input: { label: t('case.ask.needsMoreLabel'), placeholder: 'לדוגמה: תלושי שכר של 3 החודשים האחרונים', initial: c.stage === 'action-required' ? c.nextAction : '', multiline: true },
       run: async (note) =>
         Boolean(
           await patchCase(
-            { stage: 'action-required', nextAction: note.trim() || 'נדרשת השלמה מהמשרד' },
-            'נשמר — התיק מסומן "נדרשת השלמה"',
+            { stage: to, nextAction: note.trim() || 'נדרשת השלמה מהמשרד' },
+            `נשמר — התיק מסומן "${stageName(to)}"`,
           ),
         ),
     });
@@ -324,20 +357,26 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
   }
 
   function concludeInvestigation(outcome: InvestigationOutcome) {
+    const to = outcome === 'approved' ? jump('awaiting-payment') : resolveStage(config, 'decision-received');
     setAsk({
-      title: outcome === 'approved' ? 'החקירה הסתיימה באישור' : 'הבקשה נדחתה',
+      title: outcome === 'approved' ? t('case.inv.approved') : t('case.inv.rejected'),
       body:
         outcome === 'approved' ? (
-          <p className="ask-text">התיק יעבור ל&quot;{stageName('awaiting-payment')}&quot;.</p>
+          <p className="ask-text">התיק יעבור ל&quot;{stageName(to)}&quot;.</p>
         ) : (
-          <p className="ask-text">התיק יעבור ל&quot;{stageName('decision-received')}&quot; עם סטטוס נדחה.</p>
+          <p className="ask-text">התיק יעבור ל&quot;{stageName(to)}&quot; עם סטטוס נדחה.</p>
         ),
-      confirmLabel: outcome === 'approved' ? 'אישור — מעבר לתשלום' : 'סימון: נדחה',
+      confirmLabel:
+        outcome === 'approved'
+          ? to === 'awaiting-payment'
+            ? t('case.ask.approvedConfirm')
+            : t('case.advance', { stage: stageName(to) })
+          : 'סימון: נדחה',
       danger: outcome === 'rejected',
       run: async () =>
         Boolean(
           await patchCase(
-            { investigationOutcome: outcome, stage: outcome === 'approved' ? 'awaiting-payment' : 'decision-received' },
+            { investigationOutcome: outcome, stage: to },
             outcome === 'approved' ? 'החקירה הסתיימה באישור' : 'הבקשה סומנה כנדחתה',
           ),
         ),
@@ -346,7 +385,7 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
 
   function flagCase() {
     setAsk({
-      title: 'סימון התיק כתקוע',
+      title: t('case.flag'),
       confirmLabel: 'סימון',
       danger: true,
       input: { label: 'מה עוצר את התיק? (לא חובה)', placeholder: 'לדוגמה: הלקוח לא עונה כבר שבוע', multiline: true },
@@ -401,125 +440,203 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
   }
 
   // ── The "next step" for the current stage ────────────────────────────────
+  //
+  // Built-in stages keep their own panel. A forward button goes where it was
+  // written to go, unless Settings changed the road: a stage added between
+  // here and there comes first, and a hidden target passes on to the next
+  // shown stage. Then the button says "מעבר ל<stage>" instead of its own
+  // wording. A stage added in Settings gets a generic panel.
+
+  /** Where a built-in forward move really lands. */
+  function forwardTo(builtInTarget: CaseStage): CaseStage {
+    const targetAt = stageOrder(config, builtInTarget);
+    const added = shownStages.find((s) => {
+      const at = stageOrder(config, s.code);
+      return !isBuiltInStage(s.code) && at > stageIndex && at < targetAt;
+    });
+    return added?.code ?? jump(builtInTarget);
+  }
+
+  /** The built-in forward button, or a generic one when Settings put another stage on the way. */
+  function advance(builtInTarget: CaseStage, builtIn: ReactNode, cls = 'button') {
+    const to = forwardTo(builtInTarget);
+    if (to === builtInTarget) return builtIn;
+    if (to === 'closed') return closeButton(cls);
+    return (
+      <button type="button" className={cls} onClick={() => void moveTo(to)}>
+        {t('case.advance', { stage: stageName(to) })}
+        <IconArrowLeft size={16} />
+      </button>
+    );
+  }
+
+  const closeButton = (cls = 'button') => (
+    <button type="button" className={cls} onClick={() => requestStage('closed')}>
+      {t('case.closeCase')}
+    </button>
+  );
+
+  const docsActions = (primary: boolean) => (
+    <>
+      {waHref ? (
+        <a className={primary ? 'button' : 'button button-secondary'} href={waHref} target="_blank" rel="noreferrer">
+          <IconWhatsapp size={16} />
+          {t('case.docs.requestWhatsapp')}
+        </a>
+      ) : null}
+      {mailHref ? (
+        <a className={primary && !waHref ? 'button' : 'button button-secondary'} href={mailHref}>
+          <IconMail size={16} />
+          {t('case.docs.requestMail')}
+        </a>
+      ) : null}
+      <button type="button" className="button button-secondary" onClick={() => goToTab('documents')}>
+        <IconUpload size={16} />
+        {t('case.docs.upload')}
+      </button>
+    </>
+  );
+
+  const missingList = (
+    <div className="missing-list">
+      {missing.slice(0, 8).map((i) => (
+        <span key={i.code} className="file-pill">
+          {i.label}
+        </span>
+      ))}
+      {missing.length > 8 && <span className="tiny muted">ועוד {missing.length - 8}</span>}
+    </div>
+  );
+
+  /** A stage added in Settings: its own name and hint, forward, back. */
+  function customStep(): { title: string; body?: ReactNode; actions: ReactNode } {
+    const back = [...shownStages].reverse().find((s) => stageOrder(config, s.code) < stageIndex);
+    return {
+      title: missing.length ? `${stageName(c.stage)} · ${missing.length === 1 ? t('case.docs.missingOne') : t('case.docs.missingMany', { n: missing.length })}` : stageName(c.stage),
+      body: (
+        <>
+          <p className="next-step-text">{stageHint || t('case.customBody')}</p>
+          {missing.length > 0 && missingList}
+        </>
+      ),
+      actions: (
+        <>
+          {forward && (
+            <button type="button" className="button" onClick={() => (forward === 'closed' ? requestStage('closed') : void moveTo(forward))}>
+              {forward === 'closed' ? t('case.closeCase') : t('case.advance', { stage: stageName(forward) })}
+              {forward !== 'closed' && <IconArrowLeft size={16} />}
+            </button>
+          )}
+          {missing.length > 0 && docsActions(false)}
+          {back && (
+            <button type="button" className="button button-quiet" onClick={() => requestStage(back.code)}>
+              {t('case.back', { stage: back.label })}
+            </button>
+          )}
+        </>
+      ),
+    };
+  }
 
   function nextStep(): { title: string; body?: ReactNode; actions: ReactNode } {
     if (underInvestigation) {
       return {
-        title: 'התיק בחקירה — ממתינים למסקנה',
-        body: <p className="next-step-text">כשהמשרד מודיע על תוצאת החקירה, עדכנו כאן.</p>,
+        title: t('case.inv.title'),
+        body: <p className="next-step-text">{t('case.inv.body')}</p>,
         actions: (
           <>
             <button type="button" className="button" onClick={() => concludeInvestigation('approved')}>
               <IconCheck size={16} />
-              החקירה הסתיימה באישור
+              {t('case.inv.approved')}
             </button>
             <button type="button" className="button button-secondary" onClick={() => concludeInvestigation('rejected')}>
-              הבקשה נדחתה
+              {t('case.inv.rejected')}
             </button>
           </>
         ),
       };
     }
 
+    if (!isBuiltInStage(c.stage)) return customStep();
+
     switch (c.stage) {
       case 'new-client':
       case 'collecting-documents': {
         if (missing.length > 0) {
           return {
-            title: missing.length === 1 ? 'חסר מסמך אחד מהלקוח' : `חסרים ${missing.length} מסמכים מהלקוח`,
-            body: (
-              <div className="missing-list">
-                {missing.slice(0, 8).map((i) => (
-                  <span key={i.code} className="file-pill">
-                    {i.label}
-                  </span>
-                ))}
-                {missing.length > 8 && <span className="tiny muted">ועוד {missing.length - 8}</span>}
-              </div>
-            ),
+            title: missing.length === 1 ? t('case.docs.missingOne') : t('case.docs.missingMany', { n: missing.length }),
+            body: missingList,
             actions: (
               <>
-                {waHref ? (
-                  <a className="button" href={waHref} target="_blank" rel="noreferrer">
-                    <IconWhatsapp size={16} />
-                    בקשת המסמכים בוואטסאפ
-                  </a>
-                ) : null}
-                {mailHref ? (
-                  <a className={waHref ? 'button button-secondary' : 'button'} href={mailHref}>
-                    <IconMail size={16} />
-                    בקשה במייל
-                  </a>
-                ) : null}
-                <button type="button" className="button button-secondary" onClick={() => goToTab('documents')}>
-                  <IconUpload size={16} />
-                  העלאת מסמכים שהתקבלו
-                </button>
-                {c.stage === 'new-client' && (
-                  <button type="button" className="button button-quiet" onClick={() => void moveTo('collecting-documents')}>
-                    סימון: באיסוף מסמכים
-                  </button>
-                )}
+                {docsActions(true)}
+                {c.stage === 'new-client' &&
+                  !stageDef(config, 'collecting-documents')?.hidden &&
+                  advance(
+                    'collecting-documents',
+                    <button type="button" className="button button-quiet" onClick={() => void moveTo('collecting-documents')}>
+                      {t('case.docs.markCollecting')}
+                    </button>,
+                    'button button-quiet',
+                  )}
               </>
             ),
           };
         }
         return {
-          title: c.checklist.length ? 'כל המסמכים התקבלו' : 'אין רשימת מסמכים לתיק',
-          body: (
-            <p className="next-step-text">
-              {c.checklist.length
-                ? 'הגיע הזמן לעבור עליהם ולוודא שהכול תקין.'
-                : 'אפשר להוסיף מסמכים נדרשים בלשונית המסמכים, או להמשיך ישר לבדיקה.'}
-            </p>
-          ),
-          actions: (
+          title: c.checklist.length ? t('case.docs.allArrived') : t('case.docs.noList'),
+          body: <p className="next-step-text">{c.checklist.length ? t('case.docs.allArrivedBody') : t('case.docs.noListBody')}</p>,
+          actions: advance(
+            'documents-review',
             <button type="button" className="button" onClick={() => void moveTo('documents-review')}>
-              מעבר לבדיקת המסמכים
+              {t('case.docs.toReview')}
               <IconArrowLeft size={16} />
-            </button>
+            </button>,
           ),
         };
       }
 
       case 'documents-review':
         return {
-          title: toReview.length ? `לבדוק ${toReview.length === 1 ? 'מסמך אחד' : `${toReview.length} מסמכים`} ולאשר` : 'המסמכים נבדקו',
-          body: (
-            <p className="next-step-text">
-              סמנו כל מסמך כ&quot;אושר&quot; או &quot;נדרש מחדש&quot;. כשהכול תקין — מכינים את הבקשה לשליחה ללקוח.
-            </p>
-          ),
+          title: toReview.length ? (toReview.length === 1 ? t('case.review.titleOne') : t('case.review.titleMany', { n: toReview.length })) : t('case.review.done'),
+          body: <p className="next-step-text">{t('case.review.body')}</p>,
           actions: (
             <>
-              <button type="button" className="button" onClick={() => void moveTo('ready-for-client')}>
-                המסמכים תקינים — מוכן ללקוח
-                <IconArrowLeft size={16} />
-              </button>
+              {advance(
+                'ready-for-client',
+                <button type="button" className="button" onClick={() => void moveTo('ready-for-client')}>
+                  {t('case.review.ok')}
+                  <IconArrowLeft size={16} />
+                </button>,
+              )}
               {toReview.length > 0 && (
                 <button type="button" className="button button-secondary" onClick={() => goToTab('documents')}>
-                  לרשימת המסמכים
+                  {t('case.review.toList')}
                 </button>
               )}
-              <button type="button" className="button button-quiet" onClick={() => requestStage('collecting-documents')}>
-                חסר משהו — חזרה לאיסוף
-              </button>
+              {!stageDef(config, 'collecting-documents')?.hidden && (
+                <button type="button" className="button button-quiet" onClick={() => requestStage('collecting-documents')}>
+                  {t('case.review.back')}
+                </button>
+              )}
             </>
           ),
         };
 
       case 'ready-for-client':
         return {
-          title: 'לשלוח ללקוח את הבקשה המוכנה',
-          body: <p className="next-step-text">בחרו בלשונית המסמכים את הקבצים לשליחה, ושלחו ללקוח בקישור אחד במייל או בוואטסאפ.</p>,
+          title: t('case.ready.title'),
+          body: <p className="next-step-text">{t('case.ready.body')}</p>,
           actions: (
             <>
-              <button type="button" className="button" onClick={() => void moveTo('sent-to-client')}>
-                <IconCheck size={16} />
-                סימון: נשלח ללקוח
-              </button>
+              {advance(
+                'sent-to-client',
+                <button type="button" className="button" onClick={() => void moveTo('sent-to-client')}>
+                  <IconCheck size={16} />
+                  {t('case.ready.markSent')}
+                </button>,
+              )}
               <button type="button" className="button button-secondary" onClick={() => goToTab('documents')}>
-                בחירת מסמכים לשליחה
+                {t('case.ready.pick')}
               </button>
             </>
           ),
@@ -527,76 +644,81 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
 
       case 'sent-to-client':
         return {
-          title: 'כשהלקוח מאשר — מגישים למשרד',
-          body: <p className="next-step-text">אחרי ההגשה רשמו את מספר התיק שהמשרד נתן, כדי שיהיה בהישג יד בכל שיחה.</p>,
-          actions: (
+          title: t('case.sent.title'),
+          body: <p className="next-step-text">{t('case.sent.body')}</p>,
+          actions: advance(
+            'submitted',
             <button
               type="button"
               className="button"
               onClick={() =>
                 setAsk({
-                  title: 'הגשה למשרד',
-                  confirmLabel: 'סימון: הוגש למשרד',
+                  title: t('case.sent.dialogTitle'),
+                  confirmLabel: t('case.sent.markSubmitted'),
                   input: { label: 'מספר התיק במשרד (אם כבר ידוע)', initial: c.referenceNumber, placeholder: 'אפשר להשאיר ריק ולהוסיף אחר כך' },
-                  run: async (ref) =>
-                    Boolean(await moveTo('submitted', ref.trim() ? { referenceNumber: ref.trim() } : {})),
+                  run: async (ref) => Boolean(await moveTo('submitted', ref.trim() ? { referenceNumber: ref.trim() } : {})),
                 })
               }
             >
               <IconCheck size={16} />
-              סימון: הוגש למשרד
-            </button>
+              {t('case.sent.markSubmitted')}
+            </button>,
           ),
         };
 
       case 'submitted':
       case 'in-government-review':
         return {
-          title: 'ממתינים לתשובת המשרד',
+          title: t('case.office.title'),
           body: (
             <p className="next-step-text">
-              {c.submittedAt ? `הוגש ${timeAgo(c.submittedAt)}. ` : ''}מה המשרד השיב?
+              {c.submittedAt ? `הוגש ${timeAgo(c.submittedAt)}. ` : ''}
+              {t('case.office.body')}
             </p>
           ),
           actions: (
             <>
               <button type="button" className="button" onClick={officeApproved}>
                 <IconCheck size={16} />
-                המשרד אישר
+                {t('case.office.approved')}
               </button>
               <button type="button" className="button button-secondary" onClick={officeNeedsMore}>
-                ביקשו השלמה
+                {t('case.office.needsMore')}
               </button>
               <button type="button" className="button button-secondary" onClick={officeInvestigation}>
-                הועבר לחקירה
+                {t('case.office.investigation')}
               </button>
-              {c.stage === 'submitted' && (
-                <button type="button" className="button button-quiet" onClick={() => void moveTo('in-government-review')}>
-                  סימון: בטיפול המשרד
-                </button>
-              )}
+              {c.stage === 'submitted' &&
+                !stageDef(config, 'in-government-review')?.hidden &&
+                advance(
+                  'in-government-review',
+                  <button type="button" className="button button-quiet" onClick={() => void moveTo('in-government-review')}>
+                    {t('case.office.markReview')}
+                  </button>,
+                  'button button-quiet',
+                )}
             </>
           ),
         };
 
       case 'action-required':
         return {
-          title: 'המשרד ביקש השלמה',
-          body: c.nextAction ? <p className="next-step-quote">{c.nextAction}</p> : <p className="next-step-text">שלחו למשרד את מה שביקש, ועדכנו כאן.</p>,
+          title: t('case.action.title'),
+          body: c.nextAction ? <p className="next-step-quote">{c.nextAction}</p> : <p className="next-step-text">{t('case.action.body')}</p>,
           actions: (
             <>
-              <button type="button" className="button" onClick={() => void moveTo('in-government-review', { nextAction: '' })}>
+              <button type="button" className="button" onClick={() => void moveTo(jump('in-government-review'), { nextAction: '' })}>
                 <IconCheck size={16} />
-                ההשלמה נשלחה למשרד
+                {t('case.action.sent')}
               </button>
               <button type="button" className="button button-secondary" onClick={officeApproved}>
-                המשרד אישר
+                {t('case.office.approved')}
               </button>
               <button type="button" className="button button-secondary" onClick={officeNeedsMore}>
-                עדכון הבקשה
+                {t('case.action.update')}
               </button>
               <button type="button" className="button button-quiet" onClick={officeInvestigation}>
-                הועבר לחקירה
+                {t('case.office.investigation')}
               </button>
             </>
           ),
@@ -605,53 +727,58 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
       case 'decision-received':
         if (rejected) {
           return {
-            title: 'הבקשה נדחתה',
-            body: <p className="next-step-text">אם אין מה לערער — סגרו את התיק.</p>,
-            actions: (
-              <button type="button" className="button" onClick={() => requestStage('closed')}>
-                סגירת התיק
-              </button>
-            ),
+            title: t('case.decision.rejectedTitle'),
+            body: <p className="next-step-text">{t('case.decision.rejectedBody')}</p>,
+            actions: closeButton(),
           };
         }
         if (c.decisionStatus === 'approved' || c.investigationOutcome === 'approved') {
           return {
-            title: 'הבקשה אושרה',
-            body: <p className="next-step-text">נשאר לגבות את שכר הטרחה.</p>,
-            actions: (
+            title: t('case.decision.approvedTitle'),
+            body: paymentsOn ? <p className="next-step-text">{t('case.decision.approvedBody')}</p> : undefined,
+            actions: advance(
+              'awaiting-payment',
               <button type="button" className="button" onClick={() => void moveTo('awaiting-payment')}>
-                מעבר לתשלום
+                {t('case.decision.toPayment')}
                 <IconArrowLeft size={16} />
-              </button>
+              </button>,
             ),
           };
         }
         return {
-          title: 'מה החליט המשרד?',
+          title: t('case.decision.askTitle'),
           actions: (
             <>
               <button type="button" className="button" onClick={officeApproved}>
                 <IconCheck size={16} />
-                אושר
+                {t('case.decision.approved')}
               </button>
               <button type="button" className="button button-secondary" onClick={officeInvestigation}>
-                הועבר לחקירה
+                {t('case.office.investigation')}
               </button>
             </>
           ),
         };
 
       case 'awaiting-payment':
+        if (!paymentsOn) {
+          // Payments switched off in Settings: this stage is just a stop before closing.
+          return {
+            title: stageName(c.stage),
+            body: stageHint ? undefined : <p className="next-step-text">{t('case.pay.receivedBody')}</p>,
+            actions: closeButton(),
+          };
+        }
         if (!data!.canManagePayments) {
           return {
-            title: 'הבקשה אושרה — ממתין לתשלום',
-            body: <p className="next-step-text">הגבייה אצל המנהל. כשהתשלום מתקבל, התיק נסגר.</p>,
+            title: t('case.pay.workerTitle'),
+            body: <p className="next-step-text">{t('case.pay.workerBody')}</p>,
             actions: null,
           };
         }
         if (c.finance.balance > 0 && c.finance.status !== 'paid') {
           return {
-            title: `נשאר לגבות ${shekel(c.finance.balance)}`,
+            title: t('case.pay.remaining', { amount: shekel(c.finance.balance) }),
             body: (
               <p className="next-step-text">
                 שכר טרחה {shekel(c.finance.fee)}
@@ -662,34 +789,32 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
               <>
                 <button type="button" className="button" onClick={() => setPayOpen(true)}>
                   <IconCoins size={16} />
-                  רישום תשלום
+                  {t('case.recordPayment')}
                 </button>
-                <button type="button" className="button button-quiet" onClick={() => requestStage('closed')}>
-                  סגירת התיק
-                </button>
+                {closeButton('button button-quiet')}
               </>
             ),
           };
         }
         return {
-          title: 'התשלום התקבל',
-          body: <p className="next-step-text">הכול הושלם — אפשר לסגור את התיק.</p>,
-          actions: (
-            <button type="button" className="button" onClick={() => requestStage('closed')}>
-              סגירת התיק
-            </button>
-          ),
+          title: t('case.pay.receivedTitle'),
+          body: <p className="next-step-text">{t('case.pay.receivedBody')}</p>,
+          actions: closeButton(),
         };
 
       case 'closed':
       default:
         return {
-          title: 'התיק סגור',
-          body: <p className="next-step-text">{c.closedAt ? `נסגר ב-${formatDate(c.closedAt)}.` : ''} אם צריך לחזור אליו — בחרו שלב במסלול למעלה.</p>,
+          title: t('case.closed.title'),
+          body: (
+            <p className="next-step-text">
+              {c.closedAt ? `נסגר ב-${formatDate(c.closedAt)}.` : ''} {t('case.closed.body')}
+            </p>
+          ),
           actions: client ? (
             <button type="button" className="button button-secondary" onClick={() => openNew({ mode: 'case', clientId: client.id, clientName: client.fullName })}>
               <IconPlus size={16} />
-              תיק חדש ללקוח
+              {t('case.newCaseForClient')}
             </button>
           ) : null,
         };
@@ -701,7 +826,7 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
   // The reminder offered next to the next step watches whatever is still open.
   const about = [client?.fullName, c.title].filter(Boolean).join(' · ');
   const reminderBase = { about, caseId: c.id, clientId: c.clientId, handlerId: c.handlerId, handlerName: c.handlerName };
-  const awaitingMoney = c.stage === 'awaiting-payment' || (c.stage === 'decision-received' && c.finance.balance > 0);
+  const awaitingMoney = paymentsOn && (isPaymentStage(config, c.stage) || (c.stage === 'decision-received' && c.finance.balance > 0));
   const stepReminder: ReminderTarget = missing.length
     ? {
         ...reminderBase,
@@ -725,7 +850,7 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
   else if (c.decisionStatus === 'approved' || c.investigationOutcome === 'approved') stamps.push(<StampText key="ok" tone="approved">אושר</StampText>);
   if (c.stage === 'closed') stamps.push(<StampText key="closed" tone="na">סגור</StampText>);
   // Payment only matters once it is due (or money already came in).
-  if (data.canManagePayments && (c.finance.paid > 0 || (c.fee > 0 && stageIndex >= CASE_STAGES.indexOf('awaiting-payment')))) {
+  if (canPay && (c.finance.paid > 0 || (c.fee > 0 && stageIndex >= stageOrder(config, 'awaiting-payment')))) {
     const tone = c.finance.status === 'paid' ? 'approved' : c.finance.status === 'partial' ? 'review' : 'na';
     stamps.push(
       <StampText key="pay" tone={tone}>
@@ -744,20 +869,24 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
 
       {/* ── Header: a file folder whose tab carries the company colour ── */}
       <section className={`folder case-head ${c.troubleFlag || underInvestigation ? 'flagged' : ''}`} style={{ '--co': color } as CSSProperties}>
-        <span className={`folder-tab ${color ? '' : 'none'}`}>{companyName || 'ללא חברה'}</span>
+        {fieldShown('company') && <span className={`folder-tab ${color ? '' : 'none'}`}>{companyName || 'ללא חברה'}</span>}
         <div className="case-head-main">
           <div style={{ minWidth: 0 }}>
             <div className="case-head-meta">
               <span className="mono">{c.id}</span>
-              {c.caseKind === 'renewal' && <span className="chip">{CASE_KIND_LABELS.renewal}</span>}
+              {fieldShown('caseKind') && c.caseKind === 'renewal' && <span className="chip">{CASE_KIND_LABELS.renewal}</span>}
               <span className="muted">נפתח {formatDate(c.openedAt)}</span>
             </div>
             <h1 className="page-title case-title">{client?.fullName || c.title}</h1>
             <div className="case-head-sub">
               <span>{c.title}</span>
-              <span className="dot-sep" aria-hidden="true" />
-              <span>{c.officeName}</span>
-              {c.referenceNumber && (
+              {fieldShown('office') && (
+                <>
+                  <span className="dot-sep" aria-hidden="true" />
+                  <span>{c.officeName}</span>
+                </>
+              )}
+              {fieldShown('referenceNumber') && c.referenceNumber && (
                 <>
                   <span className="dot-sep" aria-hidden="true" />
                   <span>
@@ -765,6 +894,14 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
                   </span>
                 </>
               )}
+              {headerFields.map((f) => (
+                <span key={f.key} className="case-head-extra">
+                  <span className="dot-sep" aria-hidden="true" />
+                  <span>
+                    {f.label}: {f.value}
+                  </span>
+                </span>
+              ))}
             </div>
           </div>
           <div className="case-head-side">
@@ -783,24 +920,24 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
               {(data.canAssign || (data.canTransferToManager && data.managers.length > 0)) && (
                 <button type="button" className="menu-item" onClick={() => setTransferOpen(true)}>
                   <IconTransfer size={16} />
-                  {data.canAssign ? 'העברת התיק לאחר' : 'העברה למנהל'}
+                  {data.canAssign ? t('case.menu.transfer') : t('case.menu.transferToManager')}
                 </button>
               )}
               {c.troubleFlag ? (
                 <button type="button" className="menu-item" onClick={() => void patchCase({ troubleFlag: false, troubleNote: '' }, 'הסימון הוסר')}>
                   <IconFlag size={16} />
-                  הסרת סימון &quot;תקוע&quot;
+                  {t('case.menu.unflag')}
                 </button>
               ) : (
                 <button type="button" className="menu-item" onClick={flagCase}>
                   <IconFlag size={16} />
-                  סימון התיק כתקוע
+                  {t('case.flag')}
                 </button>
               )}
               {client && (
                 <button type="button" className="menu-item" onClick={() => openNew({ mode: 'case', clientId: client.id, clientName: client.fullName })}>
                   <IconPlus size={16} />
-                  תיק נוסף ללקוח
+                  {t('case.menu.anotherCase')}
                 </button>
               )}
               {isAdmin && data.canAssign && (
@@ -808,7 +945,7 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
                   <div className="menu-sep" />
                   <button type="button" className="menu-item danger" onClick={() => setDeleteOpen(true)}>
                     <IconTrash size={16} />
-                    מחיקת התיק
+                    {t('case.menu.delete')}
                   </button>
                 </>
               )}
@@ -829,21 +966,22 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
         <div className="notice danger case-flag">
           <IconFlag size={16} />
           <div style={{ flex: 1 }}>
-            <strong>התיק מסומן כתקוע</strong>
+            <strong>{t('case.flaggedBanner')}</strong>
             {c.troubleNote ? ` — ${c.troubleNote}` : ''}
           </div>
           <button type="button" className="button button-quiet button-compact" onClick={() => void patchCase({ troubleFlag: false, troubleNote: '' }, 'הסימון הוסר')}>
-            הסרת הסימון
+            {t('case.unflag')}
           </button>
         </div>
       )}
 
       {/* ── Journey ── */}
       <nav className="journey case-journey" aria-label="שלבי התיק">
-        {PHASES.map((phase) => {
-          const first = CASE_STAGES.indexOf(phase.stages[0]);
-          const last = CASE_STAGES.indexOf(phase.stages[phase.stages.length - 1]);
-          const state = stageIndex > last || (c.stage === 'closed' && phase.stages.includes('closed')) ? 'done' : stageIndex >= first ? 'current' : '';
+        {phaseGroups(config, c.stage).map((phase) => {
+          if (!phase.stages.length) return null;
+          const first = stageOrder(config, phase.stages[0].code);
+          const last = stageOrder(config, phase.stages[phase.stages.length - 1].code);
+          const state = stageIndex > last || (c.stage === 'closed' && phase.stages.some((s) => s.code === 'closed')) ? 'done' : stageIndex >= first ? 'current' : '';
           return (
             <div key={phase.id} className={`phase ${state}`}>
               <div className="phase-name">
@@ -851,8 +989,8 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
                 {phase.label}
               </div>
               <div className="phase-stages">
-                {phase.stages.map((stage) => {
-                  const i = CASE_STAGES.indexOf(stage);
+                {phase.stages.map(({ code: stage }) => {
+                  const i = stageOrder(config, stage);
                   const cls = stage === c.stage ? 'now' : i < stageIndex ? 'done' : '';
                   return (
                     <button
@@ -879,25 +1017,26 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
           {/* ── Next step ── */}
           <section className={`next-step ${underInvestigation || rejected ? 'alert' : ''}`} key={`${c.stage}-${c.decisionStatus}-${c.investigationOutcome}`}>
             <div className="next-step-head">
-              <span className="next-step-label">השלב הבא</span>
+              <span className="next-step-label">{t('case.nextStep')}</span>
               <span className="tiny muted">· {stageName(c.stage)}</span>
             </div>
             <div className="next-step-body">
               <div className="next-step-title">{step.title}</div>
               {step.body}
+              {isBuiltInStage(c.stage) && stageHint && <p className="next-step-hint">{stageHint}</p>}
               <div className="row">
                 {step.actions}
-                {c.stage !== 'closed' && <RemindButton target={stepReminder} variant="quiet" label="תזכורת לבדוק" />}
+                {c.stage !== 'closed' && <RemindButton target={stepReminder} variant="quiet" label={t('btn.remind')} />}
               </div>
             </div>
           </section>
 
           {/* ── Tabs ── */}
           <div ref={tabsRef} className="tabs" role="tablist" style={{ scrollMarginTop: 80 }}>
-            <TabButton id="documents" tab={tab} setTab={setTab} label="מסמכים" count={missing.length ? `${missing.length} חסרים` : String(data.documents.length)} />
-            {data.canManagePayments && <TabButton id="payments" tab={tab} setTab={setTab} label="תשלומים" count={data.payments.length ? String(data.payments.length) : undefined} />}
-            <TabButton id="details" tab={tab} setTab={setTab} label="פרטי התיק" />
-            <TabButton id="history" tab={tab} setTab={setTab} label="היסטוריה" count={data.activity.length ? String(data.activity.length) : undefined} />
+            <TabButton id="documents" tab={tab} setTab={setTab} label={t('case.tab.documents')} count={missing.length ? `${missing.length} חסרים` : String(data.documents.length)} />
+            {canPay && <TabButton id="payments" tab={tab} setTab={setTab} label={t('case.tab.payments')} count={data.payments.length ? String(data.payments.length) : undefined} />}
+            <TabButton id="details" tab={tab} setTab={setTab} label={t('case.tab.details')} />
+            <TabButton id="history" tab={tab} setTab={setTab} label={t('case.tab.history')} count={data.activity.length ? String(data.activity.length) : undefined} />
           </div>
 
           <div role="tabpanel" className="tab-panel" key={tab}>
@@ -955,7 +1094,7 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
               </>
             )}
 
-            {tab === 'payments' && data.canManagePayments && (
+            {tab === 'payments' && canPay && (
               <PaymentsCard
                 finance={c.finance}
                 override={c.paymentStatusOverride}
@@ -1005,7 +1144,7 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
             {tab === 'details' && (
               <>
                 <DetailsCard detail={data} onSave={(body) => patchCase(body, 'פרטי התיק נשמרו')} />
-                {(stageIndex >= CASE_STAGES.indexOf('submitted') || c.decisionStatus) && (
+                {(stageIndex >= stageOrder(config, 'submitted') || c.decisionStatus) && (
                   <section className="card">
                     <div className="card-head">
                       <div>
@@ -1109,10 +1248,18 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
             <dl className="kv">
               <dt>מטפל/ת</dt>
               <dd>{c.handlerName || 'מנהל'}</dd>
-              <dt>משרד</dt>
-              <dd>{c.officeName}</dd>
-              <dt>סוג</dt>
-              <dd>{CASE_KIND_LABELS[c.caseKind || 'new']}</dd>
+              {fieldShown('office') && (
+                <>
+                  <dt>{fieldLabel('office')}</dt>
+                  <dd>{c.officeName}</dd>
+                </>
+              )}
+              {fieldShown('caseKind') && (
+                <>
+                  <dt>סוג</dt>
+                  <dd>{CASE_KIND_LABELS[c.caseKind || 'new']}</dd>
+                </>
+              )}
               <dt>נפתח</dt>
               <dd>{formatDate(c.openedAt)}</dd>
               {c.submittedAt && (
@@ -1130,7 +1277,7 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
             </dl>
           </section>
 
-          {data.canManagePayments && (
+          {canPay && (
             <section className="card">
               <div className="card-head" style={{ marginBottom: 10 }}>
                 <div className="card-title">כסף</div>
@@ -1148,7 +1295,7 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
               </dl>
               <button type="button" className="button button-secondary button-compact" style={{ marginTop: 14, width: '100%' }} onClick={() => setPayOpen(true)}>
                 <IconCoins size={15} />
-                רישום תשלום
+                {t('case.recordPayment')}
               </button>
             </section>
           )}
@@ -1170,7 +1317,7 @@ export default function CaseDetailPage({ params }: { params: Promise<{ caseId: s
         />
       )}
 
-      {payOpen && data.canManagePayments && (
+      {payOpen && canPay && (
         <PaymentModal
           balance={c.finance.balance}
           methods={config.paymentMethods}
@@ -1732,12 +1879,24 @@ function PaymentsCard({
   );
 }
 
+/**
+ * The case's own fields, in the order and with the names set in Settings →
+ * פרטי תיק. Built-in fields keep their controls; fields added there use the
+ * shared FieldInput and are saved under `extra`. Hidden fields are neither
+ * shown nor sent, so saving never touches them.
+ */
 function DetailsCard({ detail, onSave }: { detail: CaseDetail; onSave: (body: Record<string, unknown>) => Promise<unknown> }) {
   const config = useConfig();
+  const t = useText();
   const c = detail.case;
   const [form, setForm] = useState<Record<string, string> | null>(null);
+  const [extra, setExtra] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const companies = config.companies.filter((o) => o.value !== 'none' || c.company === 'none' || !c.company);
+  const canSeeFee = Boolean(detail.canManagePayments) && config.modules.payments;
+  // Fee is money: only for whoever manages payments, and only while payments are on.
+  const fields = config.caseFields.filter((f) => f.visible && (f.key !== 'fee' || canSeeFee));
+  const added = fields.filter((f) => !f.builtIn);
 
   function start() {
     setForm({
@@ -1753,6 +1912,7 @@ function DetailsCard({ detail, onSave }: { detail: CaseDetail; onSave: (body: Re
       decision: c.decision || '',
       notes: c.notes || '',
     });
+    setExtra(Object.fromEntries(added.map((f) => [f.key, c.extra?.[f.key] ?? ''])));
   }
 
   async function save(e: React.FormEvent) {
@@ -1760,8 +1920,23 @@ function DetailsCard({ detail, onSave }: { detail: CaseDetail; onSave: (body: Re
     if (!form) return;
     setSaving(true);
     try {
-      const body: Record<string, unknown> = { ...form, fee: Number(form.fee) || 0 };
-      if (!form.company) delete body.company;
+      const shown = new Set(fields.map((f) => f.key));
+      const body: Record<string, unknown> = {
+        title: form.title,
+        nextAction: form.nextAction,
+        decision: form.decision,
+        notes: form.notes,
+      };
+      if (shown.has('company') && form.company) body.company = form.company;
+      if (shown.has('caseKind')) body.caseKind = form.caseKind;
+      if (shown.has('office')) {
+        body.office = form.office;
+        body.officeOther = form.officeOther;
+      }
+      if (shown.has('fee')) body.fee = Number(form.fee) || 0;
+      if (shown.has('referenceNumber')) body.referenceNumber = form.referenceNumber;
+      if (shown.has('description')) body.description = form.description;
+      if (added.length) body.extra = extra;
       if (await onSave(body)) setForm(null);
     } finally {
       setSaving(false);
@@ -1769,49 +1944,58 @@ function DetailsCard({ detail, onSave }: { detail: CaseDetail; onSave: (body: Re
   }
 
   if (!form) {
+    const view = (f: FieldDef): ReactNode => {
+      switch (f.key) {
+        case 'company':
+          return optionLabel(config.companies, c.company || 'none', '—');
+        case 'caseKind':
+          return CASE_KIND_LABELS[c.caseKind || 'new'];
+        case 'office':
+          return c.officeName;
+        case 'fee':
+          return <span className="num">{shekel(c.fee)}</span>;
+        case 'referenceNumber':
+          return c.referenceNumber ? <span className="mono">{c.referenceNumber}</span> : '—';
+        case 'description':
+          return c.description || null;
+        default:
+          return formatFieldValue(f, c) || '—';
+      }
+    };
     return (
       <section className="card">
         <div className="card-head">
-          <div className="card-title">פרטי התיק</div>
+          <div className="card-title">{t('case.tab.details')}</div>
           <button type="button" className="button button-secondary button-compact" onClick={start}>
             <IconPencil size={15} />
-            עריכה
+            {t('case.edit')}
           </button>
         </div>
         <dl className="kv">
-          <dt>נושא</dt>
+          <dt>{t('case.titleShort')}</dt>
           <dd>{c.title}</dd>
-          <dt>חברה מטפלת</dt>
-          <dd>{optionLabel(config.companies, c.company || 'none', '—')}</dd>
-          <dt>סוג התיק</dt>
-          <dd>{CASE_KIND_LABELS[c.caseKind || 'new']}</dd>
-          <dt>משרד</dt>
-          <dd>{c.officeName}</dd>
-          <dt>מס׳ תיק במשרד</dt>
-          <dd>{c.referenceNumber ? <span className="mono">{c.referenceNumber}</span> : '—'}</dd>
-          {detail.canManagePayments && (
-            <>
-              <dt>שכר טרחה</dt>
-              <dd className="num">{shekel(c.fee)}</dd>
-            </>
-          )}
-          <dt>פעולה הבאה</dt>
+          {fields.map((f) => {
+            const value = view(f);
+            // An empty description stays out of the way, as it always did.
+            if (value === null) return null;
+            return (
+              <Fragment key={f.key}>
+                <dt>{f.label}</dt>
+                <dd style={f.type === 'longtext' ? { whiteSpace: 'pre-wrap' } : undefined}>{value}</dd>
+              </Fragment>
+            );
+          })}
+          <dt>{t('case.nextAction')}</dt>
           <dd>{c.nextAction || '—'}</dd>
-          {c.description && (
-            <>
-              <dt>תיאור</dt>
-              <dd>{c.description}</dd>
-            </>
-          )}
           {c.decision && (
             <>
-              <dt>החלטת המשרד</dt>
+              <dt>{t('case.decisionText')}</dt>
               <dd style={{ whiteSpace: 'pre-wrap' }}>{c.decision}</dd>
             </>
           )}
           {c.notes && (
             <>
-              <dt>הערות</dt>
+              <dt>{t('case.notes')}</dt>
               <dd style={{ whiteSpace: 'pre-wrap' }}>{c.notes}</dd>
             </>
           )}
@@ -1822,78 +2006,102 @@ function DetailsCard({ detail, onSave }: { detail: CaseDetail; onSave: (body: Re
 
   const set = (key: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => setForm({ ...form, [key]: e.target.value });
 
+  const control = (f: FieldDef): ReactNode => {
+    const required = f.need === 'required';
+    const hint = f.need === 'needed' ? 'נדרש להשלמה' : undefined;
+    switch (f.key) {
+      case 'company':
+        return (
+          <Field key={f.key} label={f.label} required={required} hint={hint}>
+            <select value={form.company} onChange={set('company')} required={required}>
+              <option value="" disabled={required}>
+                {required ? 'בחרו חברה…' : '—'}
+              </option>
+              {companies.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+        );
+      case 'caseKind':
+        return (
+          <Field key={f.key} label={f.label} hint={hint}>
+            <select value={form.caseKind} onChange={set('caseKind')}>
+              {Object.entries(CASE_KIND_LABELS).map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </Field>
+        );
+      case 'office':
+        return (
+          <Fragment key={f.key}>
+            <Field label={f.label} required={required} hint={hint}>
+              <select value={form.office} onChange={set('office')} required={required}>
+                {config.offices.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            {form.office === 'other' && (
+              <Field label="שם המשרד">
+                <input value={form.officeOther} onChange={set('officeOther')} />
+              </Field>
+            )}
+          </Fragment>
+        );
+      case 'fee':
+        return (
+          <Field key={f.key} label={`${f.label} (₪)`} required={required} hint={hint}>
+            <input type="number" min="0" value={form.fee} onChange={set('fee')} required={required} />
+          </Field>
+        );
+      case 'referenceNumber':
+        return (
+          <Field key={f.key} label={f.label} required={required} hint={hint}>
+            <input value={form.referenceNumber} onChange={set('referenceNumber')} required={required} dir="ltr" style={{ textAlign: 'right' }} />
+          </Field>
+        );
+      case 'description':
+        return (
+          <Field key={f.key} label={f.label} required={required} hint={hint} full>
+            <textarea rows={2} value={form.description} onChange={set('description')} required={required} />
+          </Field>
+        );
+      default:
+        return <FieldInput key={f.key} field={f} value={extra[f.key] ?? ''} onChange={(value) => setExtra((prev) => ({ ...prev, [f.key]: value }))} />;
+    }
+  };
+
   return (
     <form className="card" onSubmit={save}>
       <div className="card-head">
-        <div className="card-title">עריכת פרטי התיק</div>
+        <div className="card-title">{t('case.editTitle')}</div>
       </div>
       <div className="form-grid">
-        <Field label="נושא התיק" full>
+        <Field label={t('case.title')} full>
           <input value={form.title} onChange={set('title')} required />
         </Field>
-        <Field label="חברה מטפלת" required>
-          <select value={form.company} onChange={set('company')} required>
-            <option value="" disabled>
-              בחרו חברה…
-            </option>
-            {companies.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="סוג התיק">
-          <select value={form.caseKind} onChange={set('caseKind')}>
-            {Object.entries(CASE_KIND_LABELS).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="משרד">
-          <select value={form.office} onChange={set('office')}>
-            {config.offices.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </Field>
-        {form.office === 'other' ? (
-          <Field label="שם המשרד">
-            <input value={form.officeOther} onChange={set('officeOther')} />
-          </Field>
-        ) : (
-          <Field label="מס׳ תיק במשרד">
-            <input value={form.referenceNumber} onChange={set('referenceNumber')} dir="ltr" style={{ textAlign: 'right' }} />
-          </Field>
-        )}
-        {form.office === 'other' && (
-          <Field label="מס׳ תיק במשרד">
-            <input value={form.referenceNumber} onChange={set('referenceNumber')} dir="ltr" style={{ textAlign: 'right' }} />
-          </Field>
-        )}
-        <Field label="שכר טרחה (₪)">
-          <input type="number" min="0" value={form.fee} onChange={set('fee')} />
-        </Field>
-        <Field label="פעולה הבאה" full>
+        {fields.map(control)}
+        <Field label={t('case.nextAction')} full>
           <input value={form.nextAction} onChange={set('nextAction')} placeholder="מה צריך לקרות עכשיו בתיק" />
         </Field>
-        <Field label="תיאור" full>
-          <textarea rows={2} value={form.description} onChange={set('description')} />
-        </Field>
-        <Field label="החלטת המשרד (טקסט חופשי)" full>
+        <Field label={`${t('case.decisionText')} (טקסט חופשי)`} full>
           <textarea rows={2} value={form.decision} onChange={set('decision')} />
         </Field>
-        <Field label="הערות" full>
+        <Field label={t('case.notes')} full>
           <textarea rows={3} value={form.notes} onChange={set('notes')} />
         </Field>
       </div>
       <div className="row" style={{ marginTop: 16 }}>
         <button type="submit" className="button" disabled={saving}>
-          {saving ? 'שומר…' : 'שמירת הפרטים'}
+          {saving ? 'שומר…' : t('case.save')}
         </button>
         <button type="button" className="button button-secondary" onClick={() => setForm(null)}>
           ביטול

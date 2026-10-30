@@ -4,26 +4,27 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import {
-  CASE_STAGES,
   PAYMENT_STATUS_LABELS,
   companyColor,
   isUnderInvestigation,
   optionLabel,
   stageLabelOf,
+  type AppConfig,
   type CaseKind,
   type CaseStage,
   type DecisionStatus,
   type InvestigationOutcome,
   type OperatingCompany,
 } from '@/lib/domain';
-import { useConfig } from '@/components/config-provider';
+import { useConfig, useText } from '@/components/config-provider';
+import { formatFieldValue } from '@/components/field-input';
 import { useSession } from '@/components/session-provider';
 import { useNewFlow } from '@/components/app-shell';
 import { useToast } from '@/components/ui/toast';
 import { Modal } from '@/components/ui/overlay';
 import { Empty, PageHead, Segmented, shekel } from '@/components/ui/bits';
 import { IconBoard, IconChevronLeft, IconFlag, IconFolder, IconList, IconPlus, IconSearch, IconX } from '@/components/ui/icons';
-import { PHASES, TRAYS, inTray, phaseOf, type PhaseId, type TrayId } from '@/components/case-trays';
+import { boardStages, inTray, phaseOfCase, phasesOf, trayDef, traysOf, type PhaseId, type TrayId } from '@/components/case-trays';
 import '../styles/lists.css';
 
 type CaseRow = {
@@ -47,27 +48,33 @@ type CaseRow = {
   assignedToName?: string;
   handlerId?: string;
   finance: { fee: number; paid: number; balance: number; status: 'paid' | 'partial' | 'unpaid' };
+  extra?: Record<string, string>;
 };
 
 type Scope = 'open' | TrayId | 'closed' | 'all';
 
-const SCOPES: { id: Scope; label: string }[] = [
-  { id: 'open', label: 'פעילים' },
-  ...TRAYS.map((t) => ({ id: t.id as Scope, label: t.label })),
-  { id: 'closed', label: 'סגורים' },
-  { id: 'all', label: 'הכול' },
-];
+const TRAY_IDS: TrayId[] = ['missing', 'ready', 'office', 'payment', 'flagged'];
+
+/** The status chips: active, the trays shown on Today (named as in Settings), closed, all. */
+function scopesOf(config: AppConfig): { id: Scope; label: string }[] {
+  return [
+    { id: 'open', label: 'פעילים' },
+    ...traysOf(config).map((t) => ({ id: t.id as Scope, label: t.label })),
+    { id: 'closed', label: 'סגורים' },
+    { id: 'all', label: 'הכול' },
+  ];
+}
 
 /** Links from the old screens (?filter=…) keep working. */
 const LEGACY_FILTER: Record<string, Scope> = { payment: 'payment', trouble: 'flagged', stuck: 'missing', waiting: 'office', open: 'open', closed: 'closed', all: 'all' };
 
 const VIEW_KEY = 'crmye-cases-view';
 
-function inScope(c: CaseRow, scope: Scope) {
+function inScope(c: CaseRow, scope: Scope, config: AppConfig) {
   if (scope === 'all') return true;
   if (scope === 'open') return c.stage !== 'closed';
   if (scope === 'closed') return c.stage === 'closed';
-  return inTray(c, scope);
+  return inTray(c, scope, config);
 }
 
 function isFlagged(c: CaseRow) {
@@ -81,10 +88,13 @@ function handlerName(c: CaseRow, people?: Map<string, string>) {
 function CasesInner() {
   const params = useSearchParams();
   const config = useConfig();
+  const t = useText();
   const { me } = useSession();
   const toast = useToast();
   const openWizard = useNewFlow();
   const isAdmin = Boolean(me?.isAdmin);
+  const scopes = scopesOf(config);
+  const phases = phasesOf(config);
 
   const [cases, setCases] = useState<CaseRow[]>([]);
   const [people, setPeople] = useState<{ id: string; name: string }[]>([]);
@@ -95,11 +105,12 @@ function CasesInner() {
 
   const [scope, setScope] = useState<Scope>(() => {
     const tray = params.get('tray');
-    if (tray && SCOPES.some((s) => s.id === tray)) return tray as Scope;
+    // Any tray works from a link, even one hidden from Today.
+    if (tray && (TRAY_IDS.includes(tray as TrayId) || ['open', 'closed', 'all'].includes(tray))) return tray as Scope;
     return LEGACY_FILTER[params.get('filter') || ''] ?? 'open';
   });
-  const [phase, setPhase] = useState<PhaseId | ''>(() => (PHASES.some((p) => p.id === params.get('phase')) ? (params.get('phase') as PhaseId) : ''));
-  const [stage, setStage] = useState<CaseStage | ''>(() => (CASE_STAGES.includes(params.get('stage') as CaseStage) ? (params.get('stage') as CaseStage) : ''));
+  const [phase, setPhase] = useState<PhaseId | ''>(() => (phasesOf(undefined).some((p) => p.id === params.get('phase')) ? (params.get('phase') as PhaseId) : ''));
+  const [stage, setStage] = useState<CaseStage | ''>(() => params.get('stage') || '');
   const [company, setCompany] = useState(params.get('company') || '');
   const [handler, setHandler] = useState(params.get('handler') || '');
   const [query, setQuery] = useState(params.get('q') || '');
@@ -179,18 +190,20 @@ function CasesInner() {
     });
   }, [cases, company, handler, query]);
 
-  const scoped = useMemo(() => byOthers.filter((c) => inScope(c, scope)), [byOthers, scope]);
+  const scoped = useMemo(() => byOthers.filter((c) => inScope(c, scope, config)), [byOthers, scope, config]);
 
   const filtered = useMemo(
     () =>
       scoped
-        .filter((c) => (!phase || phaseOf(c.stage) === phase) && (!stage || c.stage === stage))
+        .filter((c) => (!phase || phaseOfCase(config, c.stage) === phase) && (!stage || c.stage === stage))
         .sort((a, b) => Number(isFlagged(b)) - Number(isFlagged(a)) || b.updatedAt.localeCompare(a.updatedAt)),
-    [scoped, phase, stage],
+    [scoped, phase, stage, config],
   );
 
-  const scopeCount = (s: Scope) => byOthers.filter((c) => inScope(c, s)).length;
-  const phaseCount = (p: PhaseId) => scoped.filter((c) => phaseOf(c.stage) === p).length;
+  const scopeCount = (s: Scope) => byOthers.filter((c) => inScope(c, s, config)).length;
+  const phaseCount = (p: PhaseId) => scoped.filter((c) => phaseOfCase(config, c.stage) === p).length;
+  // A phase's stage pills: the shown stages, plus a hidden one that still holds cases.
+  const phaseStages = (p: PhaseId) => boardStages(config, scoped.map((c) => c.stage)).filter((s) => s.phase === p);
   const companies = config.companies.filter((co) => cases.some((c) => (c.company || 'none') === co.value));
   const handlerOptions = useMemo(() => {
     const ids = new Set(cases.map((c) => c.handlerId).filter(Boolean) as string[]);
@@ -232,18 +245,18 @@ function CasesInner() {
     toast(`${existing.clientName}: ${stageLabelOf(config, to)}`);
   }
 
-  const scopeInfo = SCOPES.find((s) => s.id === scope)!;
+  const scopeLabel = scopes.find((s) => s.id === scope)?.label ?? trayDef(config, scope as TrayId)?.label ?? '';
   const balance = (view === 'board' ? scoped : filtered).reduce((sum, c) => sum + c.finance.balance, 0);
 
   return (
     <div>
       <PageHead
         eyebrow="תיקים"
-        title={scope === 'open' ? 'תיקים פעילים' : scope === 'all' ? 'כל התיקים' : scopeInfo.label}
+        title={scope === 'open' ? 'תיקים פעילים' : scope === 'all' ? 'כל התיקים' : scopeLabel}
         sub={
           loading
             ? 'טוען…'
-            : `${(view === 'board' ? scoped : filtered).length} תיקים${scope === 'payment' && balance > 0 ? ` · יתרה לגבייה ${shekel(balance)}` : ''}`
+            : `${(view === 'board' ? scoped : filtered).length} תיקים${scope === 'payment' && config.modules.payments && balance > 0 ? ` · יתרה לגבייה ${shekel(balance)}` : ''}`
         }
         actions={
           <>
@@ -257,7 +270,7 @@ function CasesInner() {
               ]}
             />
             <button type="button" className="button" onClick={() => setPickClient(true)}>
-              <IconPlus size={16} /> תיק חדש
+              <IconPlus size={16} /> {t('btn.newCase')}
             </button>
           </>
         }
@@ -308,7 +321,7 @@ function CasesInner() {
         </div>
 
         <div className="filters-row scroll" role="group" aria-label="מצב התיק">
-          {SCOPES.map((s) => {
+          {scopes.map((s) => {
             const n = scopeCount(s.id);
             return (
               <button
@@ -330,7 +343,7 @@ function CasesInner() {
             <button type="button" className={`phase-pill ${!phase ? 'on' : ''}`} onClick={() => { setPhase(''); setStage(''); }}>
               כל השלבים
             </button>
-            {PHASES.map((p) => (
+            {phases.map((p) => (
               <button
                 key={p.id}
                 type="button"
@@ -348,9 +361,9 @@ function CasesInner() {
         )}
         {view === 'list' && phase && (
           <div className="stage-filter">
-            {PHASES.find((p) => p.id === phase)!.stages.map((s) => (
+            {phaseStages(phase).map(({ code: s, label }) => (
               <button key={s} type="button" className={`stage-pill ${stage === s ? 'on' : ''}`} onClick={() => setStage((v) => (v === s ? '' : s))}>
-                {stageLabelOf(config, s)}
+                {label}
                 <span className="n">{scoped.filter((c) => c.stage === s).length}</span>
               </button>
             ))}
@@ -418,6 +431,12 @@ function CaseLine({ c, showHandler, handler }: { c: CaseRow; showHandler: boolea
   const config = useConfig();
   const color = companyColor(config, c.company);
   const flagged = isFlagged(c);
+  const shown = (key: string) => config.caseFields.find((f) => f.key === key)?.visible !== false;
+  // Fields added in Settings and marked "show in lists".
+  const listed = config.caseFields
+    .filter((f) => !f.builtIn && f.visible && f.inList)
+    .map((f) => ({ key: f.key, label: f.label, value: formatFieldValue(f, c) }))
+    .filter((f) => f.value);
   return (
     <Link
       href={`/cases/${c.id}` as never}
@@ -431,10 +450,15 @@ function CaseLine({ c, showHandler, handler }: { c: CaseRow; showHandler: boolea
         </span>
         <span className="what" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span className="truncate">{c.title}</span>
-          {c.company && c.company !== 'none' && (
+          {shown('company') && c.company && c.company !== 'none' && (
             <span className="co-name" style={{ color: color || undefined }}>{optionLabel(config.companies, c.company, '')}</span>
           )}
-          {c.caseKind === 'renewal' && <span className="chip">חידוש</span>}
+          {shown('caseKind') && c.caseKind === 'renewal' && <span className="chip">חידוש</span>}
+          {listed.map((f) => (
+            <span key={f.key} className="tiny muted case-extra">
+              {f.label}: {f.value}
+            </span>
+          ))}
           <span className="mono tiny muted">{c.id}</span>
         </span>
       </span>
@@ -444,10 +468,14 @@ function CaseLine({ c, showHandler, handler }: { c: CaseRow; showHandler: boolea
           <span className="what truncate" style={{ display: 'block' }}>{flagged && c.troubleNote ? c.troubleNote : c.nextAction}</span>
         ) : null}
       </span>
-      <span className="hide-sm what truncate">{showHandler ? handler || '—' : c.officeName}</span>
+      <span className="hide-sm what truncate">{showHandler ? handler || '—' : shown('office') ? c.officeName : ''}</span>
       <span className="hide-sm what">
-        <span className={`pay pay-${c.finance.status}`}>{PAYMENT_STATUS_LABELS[c.finance.status]}</span>
-        {c.finance.balance > 0 && <span className="num"> · {shekel(c.finance.balance)}</span>}
+        {config.modules.payments && (
+          <>
+            <span className={`pay pay-${c.finance.status}`}>{PAYMENT_STATUS_LABELS[c.finance.status]}</span>
+            {c.finance.balance > 0 && <span className="num"> · {shekel(c.finance.balance)}</span>}
+          </>
+        )}
       </span>
       <span className="row" style={{ gap: 8, flexWrap: 'nowrap' }}>
         {c.missingItems > 0 && c.stage !== 'closed' && <span className="stamp missing">{c.missingItems} חסרים</span>}
@@ -461,7 +489,10 @@ function Board({ cases, showClosed, onMove, people }: { cases: CaseRow[]; showCl
   const config = useConfig();
   const router = useRouter();
   const [over, setOver] = useState<CaseStage | null>(null);
-  const stages = CASE_STAGES.filter((s) => showClosed || s !== 'closed');
+  const stages = boardStages(config, cases.map((c) => c.stage))
+    .map((st) => st.code)
+    .filter((s) => showClosed || s !== 'closed');
+  const companyShown = config.caseFields.find((f) => f.key === 'company')?.visible !== false;
   return (
     <div className="board">
       {stages.map((s) => {
@@ -501,9 +532,11 @@ function Board({ cases, showClosed, onMove, people }: { cases: CaseRow[]; showCl
                   tabIndex={0}
                   title="לחיצה פותחת את התיק · גרירה לעמודה אחרת מעבירה שלב"
                 >
-                  <span className={`folder-tab ${color ? '' : 'none'}`}>
-                    {c.company && c.company !== 'none' ? optionLabel(config.companies, c.company, '') : 'ללא חברה'}
-                  </span>
+                  {companyShown && (
+                    <span className={`folder-tab ${color ? '' : 'none'}`}>
+                      {c.company && c.company !== 'none' ? optionLabel(config.companies, c.company, '') : 'ללא חברה'}
+                    </span>
+                  )}
                   <div className="folder-title truncate">
                     {isFlagged(c) && <IconFlag size={13} style={{ color: 'var(--red)', marginInlineEnd: 4, verticalAlign: -2 }} />}
                     {c.clientName}

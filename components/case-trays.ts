@@ -1,7 +1,25 @@
 // The "trays" on the Today screen and the matching filters on /cases, plus the
-// four phases a case moves through. One definition, so a tray's count always
-// equals the number of cases its link shows.
-import { isUnderInvestigation, type CaseStage, type DecisionStatus, type InvestigationOutcome } from '@/lib/domain';
+// phases a case moves through. One definition, so a tray's count always
+// equals the number of cases its link shows. Both follow Settings: tray names
+// and which stage feeds which tray, phase names and which stages they hold.
+import {
+  DEFAULT_TRAYS,
+  isUnderInvestigation,
+  phaseGroups,
+  phaseOfStage,
+  stageDefs,
+  stageTray,
+  type AppConfig,
+  type CaseStage,
+  type DecisionStatus,
+  type InvestigationOutcome,
+  type PhaseId,
+  type StageDef,
+  type TrayDef,
+  type TrayId,
+} from '@/lib/domain';
+
+export type { PhaseId, TrayId };
 
 type TrayCase = {
   stage: CaseStage;
@@ -11,41 +29,61 @@ type TrayCase = {
   investigationOutcome?: InvestigationOutcome;
 };
 
-export type TrayId = 'missing' | 'ready' | 'office' | 'payment' | 'flagged';
+type TrayConfig = Partial<Pick<AppConfig, 'trays' | 'stages' | 'phases'>> | undefined;
 
-export const TRAYS: { id: TrayId; label: string; hint: string; tone: 'red' | 'amber' | 'accent' | 'green' | '' }[] = [
-  { id: 'missing', label: 'מסמכים חסרים', hint: 'לבקש מהלקוחות', tone: 'red' },
-  { id: 'ready', label: 'מוכן להגשה', hint: 'לשלוח ללקוח או להגיש', tone: 'accent' },
-  { id: 'office', label: 'ממתין למשרד', hint: 'הוגש, מחכים לתשובה', tone: '' },
-  { id: 'payment', label: 'ממתין לתשלום', hint: 'לגבות שכר טרחה', tone: 'amber' },
-  { id: 'flagged', label: 'מסומנים', hint: 'תקועים או בבירור', tone: 'red' },
-];
+const TRAY_TONES: Record<TrayId, 'red' | 'amber' | 'accent' | ''> = {
+  missing: 'red',
+  ready: 'accent',
+  office: '',
+  payment: 'amber',
+  flagged: 'red',
+};
 
-export function inTray(c: TrayCase, tray: TrayId) {
+/** The trays shown on Today, in order, with their tone. Hidden trays are left out. */
+export function traysOf(config: TrayConfig): (TrayDef & { tone: 'red' | 'amber' | 'accent' | '' })[] {
+  const list = config?.trays?.length ? config.trays : DEFAULT_TRAYS;
+  return list.filter((t) => !t.hidden).map((t) => ({ ...t, tone: TRAY_TONES[t.id] }));
+}
+
+/** Every tray including hidden ones (for filters reached by an old link). */
+export function trayDef(config: TrayConfig, id: TrayId) {
+  const list = config?.trays?.length ? config.trays : DEFAULT_TRAYS;
+  return list.find((t) => t.id === id);
+}
+
+export function inTray(c: TrayCase, tray: TrayId, config: TrayConfig) {
   if (c.stage === 'closed') return false;
   switch (tray) {
     case 'missing':
       return c.missingItems > 0 || c.stage === 'action-required';
     case 'ready':
-      return c.stage === 'ready-for-client' || c.stage === 'sent-to-client';
     case 'office':
-      return c.stage === 'submitted' || c.stage === 'in-government-review';
     case 'payment':
-      return c.stage === 'awaiting-payment';
+      return stageTray(config, c.stage) === tray;
     case 'flagged':
       return Boolean(c.troubleFlag) || isUnderInvestigation(c);
   }
 }
 
-export type PhaseId = 'intake' | 'submit' | 'office' | 'finish';
+/** Cases waiting for money: their stage feeds the payment tray (by default "ממתין לתשלום"). */
+export function isPaymentStage(config: TrayConfig, stage: string) {
+  return stage !== 'closed' && stageTray(config, stage) === 'payment';
+}
 
-export const PHASES: { id: PhaseId; label: string; stages: CaseStage[] }[] = [
-  { id: 'intake', label: 'קליטה ומסמכים', stages: ['new-client', 'collecting-documents', 'documents-review'] },
-  { id: 'submit', label: 'הכנה והגשה', stages: ['ready-for-client', 'sent-to-client', 'submitted'] },
-  { id: 'office', label: 'בטיפול המשרד', stages: ['in-government-review', 'action-required', 'decision-received'] },
-  { id: 'finish', label: 'תשלום וסגירה', stages: ['awaiting-payment', 'closed'] },
-];
+/** Phases with their shown stages; `current` keeps a hidden stage visible. */
+export function phasesOf(config: TrayConfig, current?: string) {
+  return phaseGroups(config, current);
+}
 
-export function phaseOf(stage: CaseStage): PhaseId {
-  return PHASES.find((p) => p.stages.includes(stage))?.id ?? 'intake';
+export function phaseOfCase(config: TrayConfig, stage: string): PhaseId {
+  return phaseOfStage(config, stage);
+}
+
+/**
+ * Stages to offer as board columns / filters: the shown ones in pipeline
+ * order, plus any hidden stage that still holds cases.
+ */
+export function boardStages(config: TrayConfig, inUse: Iterable<string> = []): StageDef[] {
+  const used = new Set(inUse);
+  return stageDefs(config).filter((s) => !s.hidden || used.has(s.code));
 }

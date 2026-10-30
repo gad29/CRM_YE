@@ -4,14 +4,17 @@
 //   New client:            client details → the case → required documents
 //   New case for a client: the case → required documents
 // Ends on the new case page, where "the next step" takes over.
+// Which details and case fields appear, and which are required, comes from Settings.
 import { useRouter } from 'next/navigation';
 import { useEffect, useMemo, useState, type CSSProperties } from 'react';
-import { useConfig } from '@/components/config-provider';
+import { useConfig, useText } from '@/components/config-provider';
+import { FieldInput, formFields } from '@/components/field-input';
 import { Field, Segmented } from '@/components/ui/bits';
 import { IconCheck, IconPlus, IconX } from '@/components/ui/icons';
 import { Modal } from '@/components/ui/overlay';
 import { useToast } from '@/components/ui/toast';
-import { CASE_KIND_LABELS, companyColor, type CaseKind } from '@/lib/domain';
+import { BUILT_IN_CLIENT_FIELD_KEYS, CASE_KIND_LABELS, companyColor, type CaseKind, type FieldDef } from '@/lib/domain';
+import { caseInputProblem, missingRequired, requiredError } from '@/lib/fields';
 
 export type WizardStart = { mode: 'client' } | { mode: 'case'; clientId: string; clientName: string };
 
@@ -19,16 +22,66 @@ type ClientLite = { id: string; fullName: string; phone?: string; idNumber?: str
 
 const digits = (v?: string) => (v || '').replace(/\D/g, '');
 
+/**
+ * A client detail input as set in Settings. The ID number keeps its
+ * left-to-right numeric keyboard; everything else is the shared FieldInput.
+ */
+export function ClientFieldInput({ field, value, onChange }: { field: FieldDef; value: string; onChange: (value: string) => void }) {
+  if (field.key === 'idNumber') {
+    const required = field.need === 'required';
+    return (
+      <Field label={field.label} required={required} hint={field.need === 'needed' ? 'נדרש להשלמה' : undefined}>
+        <input
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          required={required}
+          placeholder={field.placeholder || undefined}
+          inputMode="numeric"
+          dir="ltr"
+          style={{ textAlign: 'right' }}
+        />
+      </Field>
+    );
+  }
+  return <FieldInput field={field} value={value} onChange={onChange} />;
+}
+
+/** Split a flat form into the built-in client columns and the Settings-added `extra` (shown fields only). */
+export function clientPayload(form: Record<string, string>, fields: FieldDef[]) {
+  const top: Record<string, string> = { fullName: form.fullName ?? '' };
+  const extra: Record<string, string> = {};
+  for (const f of fields) {
+    if (!f.visible) continue;
+    if (BUILT_IN_CLIENT_FIELD_KEYS.includes(f.key)) top[f.key] = form[f.key] ?? '';
+    else extra[f.key] = form[f.key] ?? '';
+  }
+  return { ...top, extra };
+}
+
+/** Case fields the wizard draws itself; other shown ones go through FieldInput. */
+const OWN_CASE_FIELDS = ['company', 'caseKind', 'office', 'fee', 'referenceNumber', 'description'];
+
 export function NewCaseWizard({ start, onClose }: { start: WizardStart; onClose: () => void }) {
   const router = useRouter();
   const toast = useToast();
   const config = useConfig();
+  const t = useText();
   const forClient = start.mode === 'case';
   const steps = forClient ? (['case', 'docs'] as const) : (['client', 'case', 'docs'] as const);
   const [step, setStep] = useState(0);
   const current = steps[step];
 
-  const [client, setClient] = useState({ fullName: '', phone: '', idNumber: '', email: '', city: '', address: '', notes: '' });
+  const clientFields = formFields(config.clientFields);
+  const customCaseFields = formFields(config.caseFields, OWN_CASE_FIELDS);
+  const caseField = (key: string) => config.caseFields.find((f) => f.key === key && f.visible);
+  const company = caseField('company');
+  const caseKind = caseField('caseKind');
+  const fee = caseField('fee');
+  const office = caseField('office');
+  const reference = caseField('referenceNumber');
+  const description = caseField('description');
+
+  const [client, setClient] = useState<Record<string, string>>({ fullName: '' });
   const [openCase, setOpenCase] = useState(forClient || config.autoCreateCaseOnClient);
   const [kase, setKase] = useState({
     company: '',
@@ -36,7 +89,10 @@ export function NewCaseWizard({ start, onClose }: { start: WizardStart; onClose:
     title: config.defaultCaseTitle,
     fee: config.defaultFee ? String(config.defaultFee) : '',
     office: 'housing-ministry',
+    referenceNumber: '',
+    description: '',
   });
+  const [caseExtra, setCaseExtra] = useState<Record<string, string>>({});
   const [codes, setCodes] = useState<string[]>(config.seedChecklistByDefault ? config.documentTemplates.map((t) => t.code) : []);
   const [extra, setExtra] = useState<string[]>([]);
   const [extraDraft, setExtraDraft] = useState('');
@@ -58,13 +114,39 @@ export function NewCaseWizard({ start, onClose }: { start: WizardStart; onClose:
     return existing.find((c) => (id.length >= 5 && digits(c.idNumber) === id) || (phone.length >= 9 && digits(c.phone) === phone));
   }, [existing, client.idNumber, client.phone]);
 
+  // The same checks the server makes, so the problem shows before anything is sent.
+  function clientProblem() {
+    if (!client.fullName?.trim()) return `חסר שדה חובה: ${t('client.fullName')}`;
+    const missing = missingRequired(client, config.clientFields, 'create');
+    return missing.length ? requiredError(missing) : null;
+  }
+
+  function caseValues() {
+    const values: Record<string, string> = {};
+    for (const f of customCaseFields) values[f.key] = caseExtra[f.key] ?? '';
+    return {
+      title: kase.title.trim() || config.defaultCaseTitle,
+      company: company ? kase.company || undefined : undefined,
+      caseKind: caseKind ? kase.caseKind : undefined,
+      office: office ? kase.office : undefined,
+      fee: fee ? (kase.fee ? Number(kase.fee) : 0) : undefined,
+      referenceNumber: reference ? kase.referenceNumber.trim() || undefined : undefined,
+      description: description ? kase.description.trim() || undefined : undefined,
+      extra: values,
+    };
+  }
+
   function next() {
     setError('');
     if (current === 'client') {
-      if (!client.fullName.trim() || !client.phone.trim()) return setError('שם מלא וטלפון הם שדות חובה');
+      const problem = clientProblem();
+      if (problem) return setError(problem);
       if (!openCase) return void submit();
     }
-    if (current === 'case' && !kase.company) return setError('יש לבחור חברה מטפלת');
+    if (current === 'case') {
+      const problem = caseInputProblem(config, caseValues());
+      if (problem) return setError(problem);
+    }
     if (step < steps.length - 1) setStep(step + 1);
     else void submit();
   }
@@ -72,15 +154,7 @@ export function NewCaseWizard({ start, onClose }: { start: WizardStart; onClose:
   async function submit() {
     setSaving(true);
     setError('');
-    const casePayload = {
-      title: kase.title.trim() || config.defaultCaseTitle,
-      company: kase.company,
-      caseKind: kase.caseKind,
-      office: kase.office,
-      fee: kase.fee ? Number(kase.fee) : 0,
-      checklistCodes: codes,
-      customChecklist: extra,
-    };
+    const casePayload = { ...caseValues(), checklistCodes: codes, customChecklist: extra };
     try {
       const res = forClient
         ? await fetch('/api/cases', {
@@ -91,7 +165,7 @@ export function NewCaseWizard({ start, onClose }: { start: WizardStart; onClose:
         : await fetch('/api/clients', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ...client, createCase: openCase, case: openCase ? casePayload : undefined }),
+            body: JSON.stringify({ ...clientPayload(client, config.clientFields), createCase: openCase, case: openCase ? casePayload : undefined }),
           });
       const data = await res.json();
       if (!res.ok || !data.ok) {
@@ -117,12 +191,12 @@ export function NewCaseWizard({ start, onClose }: { start: WizardStart; onClose:
     }
   }
 
-  const STEP_NAMES = { client: 'פרטי הלקוח', case: 'התיק', docs: 'מסמכים נדרשים' } as const;
+  const STEP_NAMES = { client: t('client.detailsTitle'), case: t('wizard.stepCase'), docs: t('wizard.stepDocs') } as const;
   const isLast = step === steps.length - 1 || (current === 'client' && !openCase);
 
   return (
     <Modal
-      title={forClient ? `תיק חדש · ${start.clientName}` : 'לקוח חדש'}
+      title={forClient ? `${t('btn.newCase')} · ${start.clientName}` : t('btn.newClient')}
       size="wide"
       onClose={onClose}
       head={
@@ -143,11 +217,19 @@ export function NewCaseWizard({ start, onClose }: { start: WizardStart; onClose:
           {error && <span className="form-error" style={{ marginInlineEnd: 'auto' }}>{error}</span>}
           {step > 0 && (
             <button type="button" className="button button-secondary" onClick={() => setStep(step - 1)} disabled={saving}>
-              חזרה
+              {t('wizard.back')}
             </button>
           )}
           <button type="button" className="button" onClick={next} disabled={saving}>
-            {saving ? 'שומר…' : isLast ? (forClient ? 'פתיחת התיק' : openCase ? 'שמירה ופתיחת התיק' : 'שמירת הלקוח') : 'המשך'}
+            {saving
+              ? 'שומר…'
+              : isLast
+                ? forClient
+                  ? t('wizard.openCase')
+                  : openCase
+                    ? t('wizard.saveAndOpen')
+                    : t('wizard.saveClient')
+                : t('wizard.next')}
           </button>
         </>
       }
@@ -162,27 +244,12 @@ export function NewCaseWizard({ start, onClose }: { start: WizardStart; onClose:
         {current === 'client' && (
           <>
             <div className="form-grid">
-              <Field label="שם מלא" required>
-                <input value={client.fullName} onChange={(e) => setClient({ ...client, fullName: e.target.value })} required autoComplete="off" />
+              <Field label={t('client.fullName')} required>
+                <input value={client.fullName ?? ''} onChange={(e) => setClient({ ...client, fullName: e.target.value })} required autoComplete="off" />
               </Field>
-              <Field label="טלפון" required>
-                <input value={client.phone} onChange={(e) => setClient({ ...client, phone: e.target.value })} type="tel" dir="ltr" style={{ textAlign: 'right' }} required />
-              </Field>
-              <Field label="תעודת זהות">
-                <input value={client.idNumber} onChange={(e) => setClient({ ...client, idNumber: e.target.value })} inputMode="numeric" dir="ltr" style={{ textAlign: 'right' }} />
-              </Field>
-              <Field label="אימייל">
-                <input value={client.email} onChange={(e) => setClient({ ...client, email: e.target.value })} type="email" dir="ltr" style={{ textAlign: 'right' }} />
-              </Field>
-              <Field label="עיר">
-                <input value={client.city} onChange={(e) => setClient({ ...client, city: e.target.value })} />
-              </Field>
-              <Field label="כתובת">
-                <input value={client.address} onChange={(e) => setClient({ ...client, address: e.target.value })} />
-              </Field>
-              <Field label="הערות" full>
-                <textarea value={client.notes} onChange={(e) => setClient({ ...client, notes: e.target.value })} rows={2} />
-              </Field>
+              {clientFields.map((f) => (
+                <ClientFieldInput key={f.key} field={f} value={client[f.key] ?? ''} onChange={(v) => setClient((prev) => ({ ...prev, [f.key]: v }))} />
+              ))}
             </div>
             {duplicate && (
               <div className="notice warn">
@@ -204,59 +271,93 @@ export function NewCaseWizard({ start, onClose }: { start: WizardStart; onClose:
             )}
             <label className="checkbox">
               <input type="checkbox" checked={openCase} onChange={(e) => setOpenCase(e.target.checked)} />
-              לפתוח עכשיו תיק ללקוח
+              {t('wizard.openCaseNow')}
             </label>
           </>
         )}
 
         {current === 'case' && (
           <>
-            <div className="field">
-              <span className="field-label">
-                חברה מטפלת<span className="req" aria-hidden="true">*</span>
-              </span>
-              <div className="company-picker" role="radiogroup" aria-label="חברה מטפלת">
-                {config.companies.map((c) => {
-                  const color = companyColor(config, c.value);
-                  return (
-                    <button
-                      key={c.value}
-                      type="button"
-                      role="radio"
-                      aria-checked={kase.company === c.value}
-                      className={`company-option ${kase.company === c.value ? 'on' : ''}`}
-                      style={color ? ({ '--co': color } as CSSProperties) : undefined}
-                      onClick={() => setKase({ ...kase, company: c.value })}
-                    >
-                      <span className="company-option-tab" />
-                      {c.label}
-                    </button>
-                  );
-                })}
+            {company && (
+              <div className="field">
+                <span className="field-label">
+                  {company.label}
+                  {company.need === 'required' && <span className="req" aria-hidden="true">*</span>}
+                </span>
+                <div className="company-picker" role="radiogroup" aria-label={company.label}>
+                  {config.companies.map((c) => {
+                    const color = companyColor(config, c.value);
+                    return (
+                      <button
+                        key={c.value}
+                        type="button"
+                        role="radio"
+                        aria-checked={kase.company === c.value}
+                        className={`company-option ${kase.company === c.value ? 'on' : ''}`}
+                        style={color ? ({ '--co': color } as CSSProperties) : undefined}
+                        onClick={() => setKase({ ...kase, company: c.value })}
+                      >
+                        <span className="company-option-tab" />
+                        {c.label}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
-            </div>
+            )}
             <div className="form-grid">
-              <Field label="סוג התיק">
-                <Segmented
-                  label="סוג התיק"
-                  value={kase.caseKind}
-                  onChange={(v) => setKase({ ...kase, caseKind: v })}
-                  options={(Object.entries(CASE_KIND_LABELS) as [CaseKind, string][]).map(([value, label]) => ({ value, label }))}
-                />
-              </Field>
-              <Field label="נושא התיק">
+              {caseKind && (
+                <Field label={caseKind.label}>
+                  <Segmented
+                    label={caseKind.label}
+                    value={kase.caseKind}
+                    onChange={(v) => setKase({ ...kase, caseKind: v })}
+                    options={(Object.entries(CASE_KIND_LABELS) as [CaseKind, string][]).map(([value, label]) => ({ value, label }))}
+                  />
+                </Field>
+              )}
+              <Field label={t('case.title')}>
                 <input value={kase.title} onChange={(e) => setKase({ ...kase, title: e.target.value })} />
               </Field>
-              <Field label="שכר טרחה (₪)">
-                <input value={kase.fee} onChange={(e) => setKase({ ...kase, fee: e.target.value })} inputMode="decimal" dir="ltr" style={{ textAlign: 'right' }} />
-              </Field>
-              <Field label="משרד">
-                <select value={kase.office} onChange={(e) => setKase({ ...kase, office: e.target.value })}>
-                  {config.offices.map((o) => (
-                    <option key={o.value} value={o.value}>{o.label}</option>
-                  ))}
-                </select>
-              </Field>
+              {fee && (
+                <Field label={`${fee.label} (₪)`}>
+                  <input value={kase.fee} onChange={(e) => setKase({ ...kase, fee: e.target.value })} inputMode="decimal" dir="ltr" style={{ textAlign: 'right' }} />
+                </Field>
+              )}
+              {office && (
+                <Field label={office.label}>
+                  <select value={kase.office} onChange={(e) => setKase({ ...kase, office: e.target.value })}>
+                    {config.offices.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                </Field>
+              )}
+              {reference && (
+                <Field label={reference.label} required={reference.need === 'required'}>
+                  <input
+                    value={kase.referenceNumber}
+                    onChange={(e) => setKase({ ...kase, referenceNumber: e.target.value })}
+                    required={reference.need === 'required'}
+                    placeholder={reference.placeholder || (reference.need === 'required' ? undefined : 'אפשר להשאיר ריק ולהוסיף אחר כך')}
+                    dir="ltr"
+                    style={{ textAlign: 'right' }}
+                  />
+                </Field>
+              )}
+              {customCaseFields.map((f) => (
+                <FieldInput key={f.key} field={f} value={caseExtra[f.key] ?? ''} onChange={(v) => setCaseExtra((prev) => ({ ...prev, [f.key]: v }))} />
+              ))}
+              {description && (
+                <Field label={description.label} required={description.need === 'required'} full>
+                  <textarea
+                    rows={2}
+                    value={kase.description}
+                    onChange={(e) => setKase({ ...kase, description: e.target.value })}
+                    required={description.need === 'required'}
+                  />
+                </Field>
+              )}
             </div>
           </>
         )}
@@ -264,7 +365,7 @@ export function NewCaseWizard({ start, onClose }: { start: WizardStart; onClose:
         {current === 'docs' && (
           <>
             <div className="row between">
-              <span className="muted small">סמנו אילו מסמכים צריך לאסוף. אפשר לשנות גם אחר כך, מתוך התיק.</span>
+              <span className="muted small">{t('wizard.docsHint')}</span>
               <span className="row">
                 <button type="button" className="button button-quiet button-compact" onClick={() => setCodes(config.documentTemplates.map((t) => t.code))}>
                   סימון הכל

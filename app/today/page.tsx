@@ -23,7 +23,7 @@ import {
 } from '@/lib/store';
 import { listUsers, isAdminRole } from '@/lib/users';
 import { sessionToViewer } from '@/lib/viewer';
-import { TRAYS, inTray } from '@/components/case-trays';
+import { inTray, traysOf } from '@/components/case-trays';
 import { IconArrowLeft, IconClock, IconFlag, IconFolder, IconHistory, IconTasks } from '@/components/ui/icons';
 import { TodayNewClient, TodayTaskDone } from './today-actions';
 import '../styles/lists.css';
@@ -86,8 +86,11 @@ export default async function TodayPage() {
     finance: getCaseFinance(c, payments),
   }));
   const open = rows.filter((c) => c.stage !== 'closed');
-  const trayCounts = Object.fromEntries(TRAYS.map((t) => [t.id, rows.filter((c) => inTray(c, t.id)).length]));
-  const paymentBalance = rows.filter((c) => inTray(c, 'payment')).reduce((s, c) => s + c.finance.balance, 0);
+  const trays = traysOf(config);
+  const paymentsOn = config.modules.payments;
+  const tasksOn = config.modules.tasks;
+  const trayCounts = Object.fromEntries(trays.map((t) => [t.id, rows.filter((c) => inTray(c, t.id, config)).length]));
+  const paymentBalance = rows.filter((c) => inTray(c, 'payment', config)).reduce((s, c) => s + c.finance.balance, 0);
 
   // Cases that need a person today: flagged first, then the ones the office sent back, then missing paperwork.
   const attention = open
@@ -99,7 +102,7 @@ export default async function TodayPage() {
     })
     .slice(0, 7);
 
-  const unpaidClosed = isAdmin ? rows.filter((c) => c.stage === 'closed' && c.finance.balance > 0).slice(0, 5) : [];
+  const unpaidClosed = isAdmin && paymentsOn ? rows.filter((c) => c.stage === 'closed' && c.finance.balance > 0).slice(0, 5) : [];
 
   const priorityOrder: Record<TaskPriority, number> = { urgent: 0, high: 1, normal: 2 };
   const openTasks = tasks
@@ -118,14 +121,14 @@ export default async function TodayPage() {
     .filter((u) => u.active)
     .map((u) => {
       const handled = open.filter((c) => caseHandlerId(c) === u.id);
-      return { id: u.id, name: u.name, admin: isAdminRole(u.role), open: handled.length, flagged: handled.filter((c) => inTray(c, 'flagged')).length };
+      return { id: u.id, name: u.name, admin: isAdminRole(u.role), open: handled.length, flagged: handled.filter((c) => inTray(c, 'flagged', config)).length };
     })
     .sort((a, b) => b.open - a.open);
 
   const visibleClientIds = new Set(rows.map((c) => c.clientId));
   const activity = activityAll.filter((a) => isAdmin || (a.clientId && visibleClientIds.has(a.clientId))).slice(0, 10);
 
-  const totals = isAdmin
+  const totals = isAdmin && paymentsOn
     ? rows.reduce((acc, c) => ({ fee: acc.fee + c.finance.fee, paid: acc.paid + c.finance.paid, balance: acc.balance + c.finance.balance }), { fee: 0, paid: 0, balance: 0 })
     : null;
 
@@ -147,12 +150,12 @@ export default async function TodayPage() {
       </div>
 
       <div className="tray-row">
-        {TRAYS.map((t) => (
+        {trays.map((t) => (
           <Link key={t.id} href={`/cases?tray=${t.id}` as never} className={`tray ${trayCounts[t.id] > 0 ? t.tone : ''}`}>
             <span className="tray-count">{trayCounts[t.id]}</span>
             <span className="tray-label">{t.label}</span>
             <span className="tray-hint">
-              {t.id === 'payment' && isAdmin && paymentBalance > 0 ? `יתרה ${shekel(paymentBalance)}` : t.hint}
+              {t.id === 'payment' && isAdmin && paymentsOn && paymentBalance > 0 ? `יתרה ${shekel(paymentBalance)}` : t.hint}
             </span>
           </Link>
         ))}
@@ -204,7 +207,7 @@ export default async function TodayPage() {
                       {flagged && (
                         <span className="chip red attention-chip">{isUnderInvestigation(c) ? 'בבירור' : 'מסומן'}</span>
                       )}
-                      {!flagged && c.stage === 'action-required' && <span className="chip amber attention-chip">נדרשת השלמה</span>}
+                      {!flagged && c.stage === 'action-required' && <span className="chip amber attention-chip">{stageLabelOf(config, 'action-required')}</span>}
                       {c.missingItems > 0 && <span className="stamp missing">{c.missingItems} חסרים</span>}
                     </Link>
                   );
@@ -230,6 +233,7 @@ export default async function TodayPage() {
             )}
           </section>
 
+          {tasksOn && (
           <section className="card">
             <div className="card-head">
               <div>
@@ -281,6 +285,7 @@ export default async function TodayPage() {
               </div>
             )}
           </section>
+          )}
         </div>
 
         <aside className="stack">

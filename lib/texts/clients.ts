@@ -1,9 +1,34 @@
 import type { TextDef } from './index';
 
-/** Client screens: list, client page, new-client form. */
+/** Client screens: list, client page, and the new client / new case window. */
 export const CLIENT_TEXTS: TextDef[] = [
   { key: 'client.fullName', value: 'שם מלא', note: 'שם השדה בטופס הלקוח' },
+  { key: 'client.listTitle', value: 'הלקוחות', note: 'כותרת רשימת הלקוחות' },
+  { key: 'client.searchPlaceholder', value: 'שם, טלפון, תעודת זהות, אימייל או עיר', note: 'תיבת החיפוש ברשימת הלקוחות' },
+  { key: 'client.back', value: 'הלקוחות', note: 'קישור החזרה בראש דף הלקוח' },
   { key: 'client.missingDetails', value: 'חסרים פרטים:', note: 'בראש דף הלקוח' },
   { key: 'client.completeNow', value: 'השלמה עכשיו' },
   { key: 'client.remindComplete', value: 'תזכורת להשלים' },
+  { key: 'client.remindAbout', value: 'תזכורת על הלקוח', note: 'הפעמון בראש דף הלקוח' },
+  { key: 'client.casesTitle', value: 'תיקים', note: 'כותרת התיקים בדף הלקוח' },
+  { key: 'client.openFirstCase', value: 'פתיחת התיק הראשון של הלקוח', note: 'כרטיס התיק החדש בדף הלקוח' },
+  { key: 'client.openAnotherCase', value: 'פתיחת תיק נוסף', note: 'כרטיס התיק החדש בדף הלקוח' },
+  { key: 'client.tabDocuments', value: 'מסמכים', note: 'לשונית בדף הלקוח' },
+  { key: 'client.tabPayments', value: 'תשלומים', note: 'לשונית בדף הלקוח' },
+  { key: 'client.tabDetails', value: 'פרטים', note: 'לשונית בדף הלקוח' },
+  { key: 'client.tabHistory', value: 'היסטוריה', note: 'לשונית בדף הלקוח' },
+  { key: 'client.detailsTitle', value: 'פרטי הלקוח', note: 'לשונית הפרטים, ושלב בחלון לקוח חדש' },
+  { key: 'client.detailsSub', value: 'הטלפון והאימייל משמשים לשליחת מסמכים ותזכורות ללקוח.', note: 'מתחת לכותרת פרטי הלקוח' },
+  { key: 'client.saveDetails', value: 'שמירת הפרטים' },
+  { key: 'client.editDetails', value: 'עריכת פרטים', note: 'תפריט הפעולות בדף הלקוח' },
+  { key: 'client.delete', value: 'מחיקת הלקוח', note: 'תפריט הפעולות בדף הלקוח' },
+  { key: 'wizard.stepCase', value: 'התיק', note: 'שלב בחלון לקוח חדש / תיק חדש' },
+  { key: 'wizard.stepDocs', value: 'מסמכים נדרשים', note: 'שלב בחלון לקוח חדש / תיק חדש' },
+  { key: 'wizard.openCaseNow', value: 'לפתוח עכשיו תיק ללקוח', note: 'תיבת סימון בחלון לקוח חדש' },
+  { key: 'wizard.docsHint', value: 'סמנו אילו מסמכים צריך לאסוף. אפשר לשנות גם אחר כך, מתוך התיק.', note: 'שלב המסמכים' },
+  { key: 'wizard.back', value: 'חזרה', note: 'כפתור בחלון לקוח חדש' },
+  { key: 'wizard.next', value: 'המשך', note: 'כפתור בחלון לקוח חדש' },
+  { key: 'wizard.openCase', value: 'פתיחת התיק', note: 'כפתור הסיום בחלון תיק חדש' },
+  { key: 'wizard.saveAndOpen', value: 'שמירה ופתיחת התיק', note: 'כפתור הסיום בחלון לקוח חדש' },
+  { key: 'wizard.saveClient', value: 'שמירת הלקוח', note: 'כפתור הסיום כשלא פותחים תיק' },
 ];

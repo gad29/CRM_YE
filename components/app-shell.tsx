@@ -6,7 +6,7 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { useConfig } from '@/components/config-provider';
+import { useConfig, useText } from '@/components/config-provider';
 import { NewCaseWizard, type WizardStart } from '@/components/new-case-wizard';
 import { useSession } from '@/components/session-provider';
 import { TaskAlerts } from '@/components/task-alerts';
@@ -46,6 +46,8 @@ export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const config = useConfig();
+  const t = useText();
+  const { tasks: tasksOn, chat: chatOn, payments: paymentsOn } = config.modules;
   const { me } = useSession();
   const [open, setOpen] = useState(false);
   const [unread, setUnread] = useState(0);
@@ -58,8 +60,12 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   useEffect(() => setOpen(false), [pathname]);
 
-  // Chat badge, paused while the tab is hidden.
+  // Chat badge, paused while the tab is hidden (and off when the chat is switched off).
   useEffect(() => {
+    if (!chatOn) {
+      setUnread(0);
+      return;
+    }
     let cancelled = false;
     async function load() {
       if (document.visibilityState !== 'visible') return;
@@ -76,18 +82,18 @@ export function AppShell({ children }: { children: ReactNode }) {
       cancelled = true;
       clearInterval(t);
     };
-  }, [pathname]);
+  }, [pathname, chatOn]);
 
   const openWizard = useCallback((start?: WizardStart) => setWizard(start ?? { mode: 'client' }), []);
 
   const work: NavItem[] = [
-    { href: '/today', label: 'היום', Icon: IconToday },
-    { href: '/clients', label: 'לקוחות', Icon: IconClients },
-    { href: '/cases', label: 'תיקים', Icon: IconFolder },
-    { href: '/tasks', label: 'משימות', Icon: IconTasks },
-    { href: '/chat', label: 'צ׳אט צוות', Icon: IconChat, badge: unread },
+    { href: '/today', label: t('nav.today'), Icon: IconToday },
+    { href: '/clients', label: t('nav.clients'), Icon: IconClients },
+    { href: '/cases', label: t('nav.cases'), Icon: IconFolder },
+    ...(tasksOn ? [{ href: '/tasks', label: t('nav.tasks'), Icon: IconTasks }] : []),
+    ...(chatOn ? [{ href: '/chat', label: t('nav.chat'), Icon: IconChat, badge: unread }] : []),
   ];
-  const money: NavItem[] = [{ href: '/payments', label: 'תשלומים וגבייה', Icon: IconWallet }];
+  const money: NavItem[] = [{ href: '/payments', label: t('nav.payments'), Icon: IconWallet }];
   const admin: NavItem[] = [
     { href: '/admin/users', label: 'משתמשים והרשאות', Icon: IconUsersCog },
     { href: '/admin/settings', label: 'הגדרות', Icon: IconSettings },
@@ -128,12 +134,14 @@ export function AppShell({ children }: { children: ReactNode }) {
           <nav className="nav-group">{nav(work)}</nav>
           {me?.isAdmin && (
             <>
+              {paymentsOn && (
+                <nav className="nav-group">
+                  <div className="nav-group-label">{t('nav.groupMoney')}</div>
+                  {nav(money)}
+                </nav>
+              )}
               <nav className="nav-group">
-                <div className="nav-group-label">כספים</div>
-                {nav(money)}
-              </nav>
-              <nav className="nav-group">
-                <div className="nav-group-label">ניהול המערכת</div>
+                <div className="nav-group-label">{t('nav.groupAdmin')}</div>
                 {nav(admin)}
               </nav>
             </>
@@ -161,9 +169,9 @@ export function AppShell({ children }: { children: ReactNode }) {
             <GlobalSearch />
             <div className="spacer" />
             <button type="button" className="button" onClick={() => openWizard()}>
-              <IconPlus size={17} /> לקוח חדש
+              <IconPlus size={17} /> {t('btn.newClient')}
             </button>
-            <ReminderBell />
+            {tasksOn && <ReminderBell />}
             <ThemeToggle />
           </header>
           <main className="page" key={pathname}>
@@ -174,7 +182,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
       {wizard && <NewCaseWizard start={wizard} onClose={() => setWizard(null)} />}
       {/* The chat has its own composer in that corner. */}
-      {pathname !== '/chat' && <TaskAlerts />}
+      {pathname !== '/chat' && tasksOn && <TaskAlerts />}
     </NewFlowContext.Provider>
   );
 }
