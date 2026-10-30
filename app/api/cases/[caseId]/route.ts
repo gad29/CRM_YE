@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import {
-  CASE_STAGES,
   caseHandlerId,
   countMissingItems,
   officeDisplayName,
@@ -18,12 +17,14 @@ import {
   getCase,
   getCaseFinance,
   getClient,
+  getConfig,
   getSettings,
   listActivity,
   listCaseDocuments,
   listCasePayments,
   updateCase,
 } from '@/lib/store';
+import { cleanExtraInput, missingRequired, requiredError } from '@/lib/fields';
 import { personDirectory } from '@/lib/users';
 import { getViewer } from '@/lib/viewer';
 
@@ -103,6 +104,8 @@ export async function PATCH(request: NextRequest, { params }: Params) {
     investigationOutcome?: InvestigationOutcome | '';
     assignedTo?: string;
     paymentStatusOverride?: 'paid' | 'partial' | 'unpaid' | 'auto' | '';
+    /** Values of case fields added in Settings; an empty string clears one. */
+    extra?: Record<string, unknown>;
   };
   try {
     body = await request.json();
@@ -110,9 +113,18 @@ export async function PATCH(request: NextRequest, { params }: Params) {
     return NextResponse.json({ ok: false, error: 'Invalid request body' }, { status: 400 });
   }
 
-  if (body.stage && !CASE_STAGES.includes(body.stage)) {
-    return NextResponse.json({ ok: false, error: `Unknown stage: ${body.stage}` }, { status: 400 });
+  const config = await getConfig();
+  if (body.stage && !config.stages.some((s) => s.code === body.stage)) {
+    return NextResponse.json({ ok: false, error: 'השלב הזה כבר לא קיים — רעננו את הדף' }, { status: 400 });
   }
+  if (body.company && !config.companies.some((c) => c.value === body.company)) {
+    return NextResponse.json({ ok: false, error: 'החברה שנבחרה לא קיימת ברשימת החברות' }, { status: 400 });
+  }
+  const extra = cleanExtraInput(body.extra, config.caseFields);
+  const plain = { ...body };
+  delete plain.extra;
+  const missing = missingRequired({ ...plain, ...extra } as Record<string, string | number | undefined>, config.caseFields, 'update');
+  if (missing.length) return NextResponse.json({ ok: false, error: requiredError(missing) }, { status: 400 });
 
   // Transfers: an admin can hand a case to any active manager or worker; a
   // worker can hand a case they handle back to a manager (not to other workers).
@@ -129,7 +141,7 @@ export async function PATCH(request: NextRequest, { params }: Params) {
     body.assignedTo = target;
   }
 
-  const updated = await updateCase(caseId, body);
+  const updated = await updateCase(caseId, { ...plain, extra });
   if (!updated) return NextResponse.json({ ok: false, error: 'Case not found' }, { status: 404 });
   // After a transfer a worker may no longer have access — the page uses this to leave.
   return NextResponse.json({ ok: true, data: updated, stillVisible: caseVisibleTo(updated, auth.viewer) });

@@ -10,6 +10,7 @@ import {
 } from '@/lib/domain';
 import { createCase, getCaseFinance, getConfig, listClients, listPayments, listVisibleCases } from '@/lib/store';
 import { personDirectory } from '@/lib/users';
+import { caseInputProblem, cleanExtraInput } from '@/lib/fields';
 import { actorId, getViewer } from '@/lib/viewer';
 
 export async function GET() {
@@ -56,6 +57,9 @@ export async function POST(request: NextRequest) {
     caseKind?: CaseKind;
     checklistCodes?: string[];
     customChecklist?: string[];
+    referenceNumber?: string;
+    /** Values of case fields added in Settings. */
+    extra?: Record<string, unknown>;
   };
   try {
     body = await request.json();
@@ -66,9 +70,10 @@ export async function POST(request: NextRequest) {
   if (!body.clientId || !body.title?.trim()) {
     return NextResponse.json({ ok: false, error: 'לקוח וכותרת תיק הם שדות חובה' }, { status: 400 });
   }
-  if (!(await getConfig()).companies.some((c) => c.value === body.company)) {
-    return NextResponse.json({ ok: false, error: 'יש לבחור חברה מטפלת לתיק' }, { status: 400 });
-  }
+  const config = await getConfig();
+  const extra = cleanExtraInput(body.extra, config.caseFields);
+  const problem = caseInputProblem(config, { ...body, extra });
+  if (problem) return NextResponse.json({ ok: false, error: problem }, { status: 400 });
 
   const record = await createCase({
     clientId: body.clientId,
@@ -83,6 +88,8 @@ export async function POST(request: NextRequest) {
     openedBy: actorId(auth.session),
     checklistCodes: body.checklistCodes,
     customChecklist: body.customChecklist,
+    referenceNumber: body.referenceNumber,
+    extra,
   });
   if (!record) return NextResponse.json({ ok: false, error: 'Client not found' }, { status: 404 });
   return NextResponse.json({ ok: true, data: record }, { status: 201 });

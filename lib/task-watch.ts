@@ -11,6 +11,7 @@ import {
   TASK_WATCH_KINDS,
   checklistItemIsMissing,
   countMissingItems,
+  fieldValue,
   type ClientDetailField,
   type TaskRecord,
   type TaskWatchKind,
@@ -24,8 +25,9 @@ export function isWatchKind(value: unknown): value is TaskWatchKind {
   return TASK_WATCH_KINDS.includes(value as TaskWatchKind);
 }
 
+/** Field keys from a watch reference: built-in client columns or fields added in Settings. */
 export function parseDetailFields(ref?: string): ClientDetailField[] {
-  return (ref || '').split(',').filter((f): f is ClientDetailField => f in CLIENT_DETAIL_LABELS);
+  return (ref || '').split(',').filter((f) => f in CLIENT_DETAIL_LABELS || /^f-[a-z0-9]{1,16}$/.test(f));
 }
 
 /** Why the watched gap is filled, or null while it is still open. */
@@ -36,7 +38,7 @@ export async function watchResolution(task: Watched): Promise<string | null> {
     const client = task.clientId ? await getClient(task.clientId) : undefined;
     if (!client) return 'הלקוח נמחק';
     const fields = parseDetailFields(task.watchRef);
-    return fields.length && fields.every((f) => client[f]?.trim()) ? 'הפרטים הושלמו' : null;
+    return fields.length && fields.every((f) => fieldValue(client, f).trim()) ? 'הפרטים הושלמו' : null;
   }
 
   const caseRecord = task.caseId ? await getCase(task.caseId) : undefined;

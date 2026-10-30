@@ -12,12 +12,20 @@ import {
   countMissingItems,
   DECISION_LABELS,
   DEFAULT_APP_CONFIG,
+  DEFAULT_CASE_FIELDS,
+  DEFAULT_CLIENT_FIELDS,
+  DEFAULT_PHASES,
+  DEFAULT_STAGES,
+  DEFAULT_TRAYS,
   documentTemplates,
   INVESTIGATION_OUTCOME_LABELS,
   LEGACY_STAGE_MAP,
   officeDisplayName,
-  OPEN_STAGES,
+  isBuiltInStage,
+  PHASE_IDS,
   PAYMENT_STATUS_LABELS,
+  resolveStage,
+  stageLabelOf,
   STAGE_LABELS,
   type ActivityRecord,
   type AdminRecord,
@@ -28,6 +36,8 @@ import {
   type ChecklistItem,
   type ChecklistStatus,
   type ClientRecord,
+  type FieldDef,
+  type StageDef,
   type DecisionStatus,
   type DocumentRecord,
   type GovernmentOffice,
@@ -155,6 +165,7 @@ function toClient(row: Row): ClientRecord {
     address: opt(row.address),
     city: opt(row.city),
     notes: opt(row.notes),
+    extra: row.extra ?? {},
     createdBy: opt(row.created_by),
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
@@ -181,8 +192,21 @@ export interface CreateClientInput {
   address?: string;
   city?: string;
   notes?: string;
+  /** Values of fields added in Settings; an empty string clears one. */
+  extra?: Record<string, string>;
   /** Worker id who created the client ('admin' for the admin). */
   createdBy?: string;
+}
+
+/** Merge new values of Settings-added fields into the saved ones; empty values are dropped. */
+function mergeExtra(current: Record<string, string> | undefined, patch: Record<string, string> | undefined) {
+  const next: Record<string, string> = { ...(current ?? {}) };
+  for (const [key, value] of Object.entries(patch ?? {})) {
+    const trimmed = String(value ?? '').trim();
+    if (trimmed) next[key] = trimmed.slice(0, 2000);
+    else delete next[key];
+  }
+  return next;
 }
 
 export async function createClient(input: CreateClientInput): Promise<ClientRecord> {
@@ -195,6 +219,7 @@ export async function createClient(input: CreateClientInput): Promise<ClientReco
     address: input.address?.trim() || undefined,
     city: input.city?.trim() || undefined,
     notes: input.notes?.trim() || undefined,
+    extra: mergeExtra({}, input.extra),
     createdBy: input.createdBy || 'admin',
     createdAt: nowIso(),
     updatedAt: nowIso(),
@@ -218,17 +243,18 @@ async function writeClient(record: ClientRecord, mode: 'insert' | 'update') {
     record.createdBy ?? null,
     record.createdAt,
     record.updatedAt,
+    JSON.stringify(record.extra ?? {}),
   ];
   if (mode === 'insert') {
     await sql(
-      `INSERT INTO clients (id, full_name, id_number, phone, email, address, city, notes, created_by, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      `INSERT INTO clients (id, full_name, id_number, phone, email, address, city, notes, created_by, created_at, updated_at, extra)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
       values,
     );
   } else {
     await sql(
       `UPDATE clients SET full_name = $2, id_number = $3, phone = $4, email = $5, address = $6, city = $7,
-              notes = $8, created_by = $9, created_at = $10, updated_at = $11
+              notes = $8, created_by = $9, created_at = $10, updated_at = $11, extra = $12
         WHERE id = $1`,
       values,
     );
@@ -239,9 +265,11 @@ export async function updateClient(clientId: string, input: Partial<CreateClient
   const updated = await transaction(async () => {
     const current = await getClient(clientId, { forUpdate: true });
     if (!current) return undefined;
+    const { extra, ...plain } = input;
     const next: ClientRecord = {
       ...current,
-      ...Object.fromEntries(Object.entries(input).filter(([, v]) => v !== undefined)),
+      ...Object.fromEntries(Object.entries(plain).filter(([, v]) => v !== undefined)),
+      extra: mergeExtra(current.extra, extra),
       updatedAt: nowIso(),
     };
     await writeClient(next, 'update');
@@ -320,6 +348,7 @@ function toCase(row: Row, checklist: ChecklistItem[]): CaseRecord {
     decisionStatus: opt(row.decision_status) as DecisionStatus | undefined,
     investigationOutcome: opt(row.investigation_outcome) as InvestigationOutcome | undefined,
     paymentStatusOverride: opt(row.payment_status_override) as PaymentStatus | undefined,
+    extra: row.extra ?? {},
     openedAt: iso(row.opened_at),
     submittedAt: isoOpt(row.submitted_at),
     decisionAt: isoOpt(row.decision_at),
@@ -386,15 +415,16 @@ async function writeCase(record: CaseRecord, mode: 'insert' | 'update') {
     record.decisionAt ?? null,
     record.closedAt ?? null,
     record.updatedAt,
+    JSON.stringify(record.extra ?? {}),
   ];
   if (mode === 'insert') {
     await sql(
       `INSERT INTO cases (id, client_id, title, office, office_other, description, stage, company, case_kind,
               trouble_flag, trouble_note, opened_by, assigned_to, fee, reference_number, next_action, notes, decision,
               decision_status, investigation_outcome, payment_status_override, opened_at, submitted_at, decision_at,
-              closed_at, updated_at)
+              closed_at, updated_at, extra)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
-               $23, $24, $25, $26)`,
+               $23, $24, $25, $26, $27)`,
       values,
     );
   } else {
@@ -403,7 +433,7 @@ async function writeCase(record: CaseRecord, mode: 'insert' | 'update') {
               company = $8, case_kind = $9, trouble_flag = $10, trouble_note = $11, opened_by = $12, assigned_to = $13,
               fee = $14, reference_number = $15, next_action = $16, notes = $17, decision = $18, decision_status = $19,
               investigation_outcome = $20, payment_status_override = $21, opened_at = $22, submitted_at = $23,
-              decision_at = $24, closed_at = $25, updated_at = $26
+              decision_at = $24, closed_at = $25, updated_at = $26, extra = $27
         WHERE id = $1`,
       values,
     );
@@ -438,6 +468,9 @@ export interface CreateCaseInput {
   checklistCodes?: string[];
   /** Free-text custom checklist items. */
   customChecklist?: string[];
+  referenceNumber?: string;
+  /** Values of case fields added in Settings. */
+  extra?: Record<string, string>;
 }
 
 export async function createCase(input: CreateCaseInput): Promise<CaseRecord | undefined> {
@@ -471,7 +504,8 @@ export async function createCase(input: CreateCaseInput): Promise<CaseRecord | u
     office: input.office,
     officeOther: input.officeOther?.trim() || undefined,
     description: input.description?.trim() || undefined,
-    stage: checklist.length ? 'collecting-documents' : 'new-client',
+    // A stage hidden in Settings is skipped to the next one shown.
+    stage: resolveStage(config, checklist.length ? 'collecting-documents' : 'new-client'),
     checklist,
     company: input.company,
     caseKind: input.caseKind || 'new',
@@ -479,6 +513,8 @@ export async function createCase(input: CreateCaseInput): Promise<CaseRecord | u
     openedBy: input.openedBy || 'admin',
     fee: Number.isFinite(input.fee) && (input.fee as number) >= 0 ? Number(input.fee) : 0,
     nextAction: input.nextAction?.trim() || undefined,
+    referenceNumber: input.referenceNumber?.trim() || undefined,
+    extra: mergeExtra({}, input.extra),
     openedAt: nowIso(),
     updatedAt: nowIso(),
   };
@@ -519,6 +555,8 @@ export interface UpdateCaseInput {
   assignedTo?: string;
   /** 'paid' | 'partial' | 'unpaid' to force a status; 'auto' or '' clears back to computed. */
   paymentStatusOverride?: PaymentStatus | 'auto' | '';
+  /** Values of case fields added in Settings; an empty string clears one. */
+  extra?: Record<string, string>;
 }
 
 export async function updateCase(caseId: string, input: UpdateCaseInput) {
@@ -527,9 +565,11 @@ export async function updateCase(caseId: string, input: UpdateCaseInput) {
     if (!current) return undefined;
     const previousStage = current.stage;
 
+    const { extra, ...plain } = input;
     const updated: CaseRecord = {
       ...current,
-      ...Object.fromEntries(Object.entries(input).filter(([, v]) => v !== undefined)),
+      ...Object.fromEntries(Object.entries(plain).filter(([, v]) => v !== undefined)),
+      extra: mergeExtra(current.extra, extra),
       updatedAt: nowIso(),
     };
     if (input.assignedTo !== undefined) {
@@ -562,11 +602,12 @@ export async function updateCase(caseId: string, input: UpdateCaseInput) {
   const { current, updated, previousStage } = result;
 
   if (input.stage && input.stage !== previousStage) {
+    const config = await getConfig();
     await logActivity({
       type: 'case-stage-changed',
       clientId: updated.clientId,
       caseId,
-      summary: `שלב התיק "${updated.title}" עודכן: ${STAGE_LABELS[previousStage]} ← ${STAGE_LABELS[input.stage]}`,
+      summary: `שלב התיק "${updated.title}" עודכן: ${stageLabelOf(config, previousStage)} ← ${stageLabelOf(config, input.stage)}`,
     });
   } else {
     await logActivity({ type: 'case-updated', clientId: updated.clientId, caseId, summary: `עודכן תיק "${updated.title}"` });
@@ -1189,7 +1230,7 @@ export async function getDashboardSummary(caseFilter?: (caseRecord: CaseRecord) 
   let actionRequired = 0;
   for (const caseRecord of cases) {
     byStage[caseRecord.stage] = (byStage[caseRecord.stage] ?? 0) + 1;
-    if (OPEN_STAGES.includes(caseRecord.stage) && countMissingItems(caseRecord) > 0) missingDocsCases += 1;
+    if (caseRecord.stage !== 'closed' && countMissingItems(caseRecord) > 0) missingDocsCases += 1;
     if (caseRecord.stage === 'action-required') actionRequired += 1;
   }
 
@@ -1536,35 +1577,164 @@ async function saveSettings(settings: AppSettings) {
 
 // ── App configuration (fully editable from the Settings page) ────────────────
 
-function mergeConfig(saved: Partial<AppConfig>): AppConfig {
+/** Saved config may still carry the stage names of older versions. */
+type SavedConfig = Partial<AppConfig> & { stageLabels?: Record<string, string> };
+
+const STAGE_TRAYS = ['ready', 'office', 'payment'];
+const FIELD_TYPES = ['text', 'longtext', 'phone', 'email', 'number', 'date', 'select', 'yesno'];
+const FIELD_NEEDS = ['optional', 'needed', 'required'];
+export const CUSTOM_STAGE_CODE = /^st-[a-z0-9]{1,16}$/;
+export const CUSTOM_FIELD_KEY = /^f-[a-z0-9]{1,16}$/;
+
+const clip = (value: unknown, max: number) => (typeof value === 'string' ? value.trim().slice(0, max) : '');
+
+/**
+ * The pipeline in a safe shape: every built-in stage present (they can be
+ * hidden, not removed), grouped by phase in phase order, 'closed' last and shown.
+ */
+export function normalizeStages(list: StageDef[] | undefined, legacyLabels?: Record<string, string>): StageDef[] {
+  const source = list?.length
+    ? list
+    : DEFAULT_STAGES.map((s) => ({ ...s, label: clip(legacyLabels?.[s.code], 60) || s.label }));
+  const seen = new Set<string>();
+  const out: StageDef[] = [];
+  for (const st of source) {
+    if (!st || typeof st.code !== 'string' || seen.has(st.code)) continue;
+    if (!isBuiltInStage(st.code) && !CUSTOM_STAGE_CODE.test(st.code)) continue;
+    seen.add(st.code);
+    const hint = clip(st.hint, 300);
+    out.push({
+      code: st.code,
+      label: clip(st.label, 60) || stageLabelOf(undefined, st.code),
+      phase: PHASE_IDS.includes(st.phase) ? st.phase : 'intake',
+      ...(st.hidden && st.code !== 'closed' ? { hidden: true } : {}),
+      ...(hint ? { hint } : {}),
+      ...(st.tray && STAGE_TRAYS.includes(st.tray) ? { tray: st.tray } : {}),
+    });
+  }
+  for (const d of DEFAULT_STAGES) if (!seen.has(d.code)) out.push({ ...d });
+  const closed = out.find((s) => s.code === 'closed')!;
+  closed.phase = 'finish';
+  return [...PHASE_IDS.flatMap((p) => out.filter((s) => s.phase === p && s.code !== 'closed')), closed];
+}
+
+/** Field list in a safe shape: built-ins keep their key and type and can't be removed. */
+export function normalizeFields(list: FieldDef[] | undefined, defaults: FieldDef[]): FieldDef[] {
+  const source = list?.length ? list : defaults;
+  const seen = new Set<string>();
+  const out: FieldDef[] = [];
+  for (const f of source) {
+    if (!f || typeof f.key !== 'string' || seen.has(f.key)) continue;
+    const builtIn = defaults.find((d) => d.key === f.key);
+    if (!builtIn && !CUSTOM_FIELD_KEY.test(f.key)) continue;
+    seen.add(f.key);
+    const type = builtIn ? builtIn.type : FIELD_TYPES.includes(f.type) ? f.type : 'text';
+    const options =
+      !builtIn && type === 'select' && Array.isArray(f.options)
+        ? [...new Set(f.options.map((o) => clip(o, 80)).filter(Boolean))].slice(0, 50)
+        : undefined;
+    const placeholder = clip(f.placeholder, 80);
+    out.push({
+      key: f.key,
+      label: clip(f.label, 60) || builtIn?.label || 'שדה',
+      type,
+      ...(options ? { options } : {}),
+      visible: f.visible !== false,
+      need: FIELD_NEEDS.includes(f.need) ? f.need : 'optional',
+      ...(builtIn ? { builtIn: true } : {}),
+      ...(f.inList ? { inList: true } : {}),
+      ...(placeholder ? { placeholder } : {}),
+    });
+  }
+  for (const d of defaults) if (!seen.has(d.key)) out.push({ ...d });
+  return out;
+}
+
+function mergeConfig(saved: SavedConfig): AppConfig {
+  const { stageLabels, ...rest } = saved;
   return {
     ...DEFAULT_APP_CONFIG,
-    ...saved,
-    stageLabels: { ...DEFAULT_APP_CONFIG.stageLabels, ...(saved.stageLabels ?? {}) },
+    ...rest,
     companies: saved.companies?.length ? saved.companies : DEFAULT_APP_CONFIG.companies,
     documentTemplates: saved.documentTemplates?.length ? saved.documentTemplates : DEFAULT_APP_CONFIG.documentTemplates,
     paymentMethods: saved.paymentMethods?.length ? saved.paymentMethods : DEFAULT_APP_CONFIG.paymentMethods,
     offices: saved.offices?.length ? saved.offices : DEFAULT_APP_CONFIG.offices,
+    stages: normalizeStages(saved.stages, stageLabels),
+    phases: DEFAULT_PHASES.map((p) => ({ ...p, label: clip(saved.phases?.find((s) => s.id === p.id)?.label, 40) || p.label })),
+    trays: DEFAULT_TRAYS.map((t) => {
+      const own = saved.trays?.find((s) => s.id === t.id);
+      return {
+        ...t,
+        label: clip(own?.label, 40) || t.label,
+        hint: own?.hint !== undefined ? clip(own.hint, 80) : t.hint,
+        ...(own?.hidden ? { hidden: true } : {}),
+      };
+    }),
+    clientFields: normalizeFields(saved.clientFields, DEFAULT_CLIENT_FIELDS),
+    caseFields: normalizeFields(saved.caseFields, DEFAULT_CASE_FIELDS),
+    modules: { ...DEFAULT_APP_CONFIG.modules, ...(saved.modules ?? {}) },
+    texts: saved.texts && typeof saved.texts === 'object' ? saved.texts : {},
   };
 }
 
 export async function getConfig(): Promise<AppConfig> {
-  return mergeConfig(await readKv<Partial<AppConfig>>('config', {}));
+  return mergeConfig(await readKv<SavedConfig>('config', {}));
 }
 
-export async function saveConfig(patch: Partial<AppConfig>): Promise<AppConfig> {
+/** Raised when saving would remove a stage that still has cases in it. */
+export class StageInUseError extends Error {
+  constructor(public readonly inUse: { code: string; label: string; cases: number }[]) {
+    super(`יש תיקים בשלבים שהוסרו: ${inUse.map((s) => `${s.label} (${s.cases})`).join(', ')}`);
+  }
+}
+
+/**
+ * Save part of the config. `stageMoves` ({ from: to }) first moves the cases of
+ * stages being removed; a removed stage that still has cases refuses the save.
+ */
+export async function saveConfig(patch: Partial<AppConfig>, stageMoves: Record<string, string> = {}): Promise<AppConfig> {
+  let moved = 0;
   const next = await transaction(async () => {
     await sql("SELECT pg_advisory_xact_lock(hashtext('crmye-config'))");
-    const saved = await readKv<Partial<AppConfig>>('config', {});
-    const merged: Partial<AppConfig> = { ...saved, ...patch };
-    if (patch.stageLabels) {
-      merged.stageLabels = { ...(saved.stageLabels ?? {}), ...patch.stageLabels };
+    const saved = await readKv<SavedConfig>('config', {});
+    const merged: SavedConfig = { ...saved, ...patch };
+    if (patch.stages) {
+      const before = mergeConfig(saved).stages;
+      const after = normalizeStages(patch.stages);
+      const kept = new Set(after.map((s) => s.code));
+      for (const [from, to] of Object.entries(stageMoves)) {
+        if (kept.has(from) || !kept.has(to)) continue;
+        moved += (await sql('UPDATE cases SET stage = $2, updated_at = $3 WHERE stage = $1 RETURNING id', [from, to, nowIso()])).length;
+      }
+      const removed = before.filter((s) => !kept.has(s.code));
+      if (removed.length) {
+        const counts = await sql('SELECT stage, count(*)::int AS n FROM cases WHERE stage = ANY($1) GROUP BY stage', [removed.map((s) => s.code)]);
+        if (counts.length) {
+          throw new StageInUseError(counts.map((r) => ({ code: r.stage, label: stageLabelOf({ stages: before }, r.stage), cases: r.n })));
+        }
+      }
+      merged.stages = after;
+      delete merged.stageLabels;
     }
     await writeKv('config', merged);
     return merged;
   });
-  await logActivity({ type: 'config-updated', summary: 'עודכנו הגדרות המערכת' });
+  await logActivity({
+    type: 'config-updated',
+    summary: moved ? `עודכנו הגדרות המערכת; ${moved} תיקים הועברו משלבים שהוסרו` : 'עודכנו הגדרות המערכת',
+  });
   return mergeConfig(next);
+}
+
+/** How many cases sit in each stage, and how many clients / cases filled each added field — for the Settings editors. */
+export async function configUsage() {
+  const [stages, clientKeys, caseKeys] = await Promise.all([
+    sql('SELECT stage, count(*)::int AS n FROM cases GROUP BY stage'),
+    sql('SELECT key, count(*)::int AS n FROM clients, jsonb_object_keys(extra) AS key GROUP BY key'),
+    sql('SELECT key, count(*)::int AS n FROM cases, jsonb_object_keys(extra) AS key GROUP BY key'),
+  ]);
+  const toMap = (rows: Row[], k: string) => Object.fromEntries(rows.map((r) => [r[k], r.n as number]));
+  return { stages: toMap(stages, 'stage'), clientFields: toMap(clientKeys, 'key'), caseFields: toMap(caseKeys, 'key') };
 }
 
 /** Resolve a checklist-template label from config, falling back to the built-in list. */

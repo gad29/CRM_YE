@@ -3,6 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
 import { usePathname } from 'next/navigation';
 import { DEFAULT_APP_CONFIG, optionLabel, stageLabelOf, type AppConfig } from '@/lib/domain';
+import { textOf } from '@/lib/texts';
 
 type ConfigContextValue = {
   config: AppConfig;
@@ -44,6 +45,12 @@ export function useConfig() {
 
 export function useConfigRefresh() {
   return useContext(ConfigContext).refresh;
+}
+
+/** t(key, vars?) → the wording set in Settings → ניסוחים, else the default (lib/texts). */
+export function useText() {
+  const config = useConfig();
+  return useCallback((key: string, vars?: Record<string, string | number>) => textOf(config, key, vars), [config]);
 }
 
 /** Convenience label resolvers bound to the current config. */

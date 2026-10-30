@@ -7,7 +7,9 @@
  * receiving the decision, closing the case, and collecting payment.
  */
 
-export type CaseStage =
+/** The stages the system ships with. Each one carries built-in behaviour (the
+ *  "next step" panel, payments, closing); stages added in Settings are plain. */
+export type BuiltInStage =
   | 'new-client'
   | 'collecting-documents'
   | 'documents-review'
@@ -20,7 +22,10 @@ export type CaseStage =
   | 'awaiting-payment'
   | 'closed';
 
-export const CASE_STAGES: CaseStage[] = [
+/** A stage code: a built-in one, or one added in Settings (st-xxxx). */
+export type CaseStage = BuiltInStage | (string & {});
+
+export const CASE_STAGES: BuiltInStage[] = [
   'new-client',
   'collecting-documents',
   'documents-review',
@@ -34,7 +39,7 @@ export const CASE_STAGES: CaseStage[] = [
   'closed',
 ];
 
-export const STAGE_LABELS: Record<CaseStage, string> = {
+export const STAGE_LABELS: Record<BuiltInStage, string> = {
   'new-client': 'תיק חדש',
   'collecting-documents': 'איסוף מסמכים',
   'documents-review': 'בדיקת מסמכים',
@@ -57,7 +62,7 @@ export function isUnderInvestigation(caseRecord: {
 }
 
 /** Legacy stage codes → current codes (kept for data written by older versions). */
-export const LEGACY_STAGE_MAP: Record<string, CaseStage> = {
+export const LEGACY_STAGE_MAP: Record<string, BuiltInStage> = {
   'ready-to-submit': 'ready-for-client',
 };
 
@@ -76,6 +81,10 @@ export const INVESTIGATION_OUTCOME_LABELS: Record<InvestigationOutcome, string> 
 
 /** Stages that count as an open, active case. */
 export const OPEN_STAGES: CaseStage[] = CASE_STAGES.filter((s) => s !== 'closed');
+
+export function isBuiltInStage(code: string): code is BuiltInStage {
+  return (CASE_STAGES as string[]).includes(code);
+}
 
 export type GovernmentOffice =
   | 'bituach-leumi'
@@ -168,6 +177,8 @@ export interface ClientRecord {
   address?: string;
   city?: string;
   notes?: string;
+  /** Values of client fields added in Settings, by field key. */
+  extra?: Record<string, string>;
   /** Worker id who created the client; 'admin' or absent for the admin. */
   createdBy?: string;
   createdAt: string;
@@ -235,6 +246,8 @@ export interface CaseRecord {
   investigationOutcome?: InvestigationOutcome;
   /** Manual override for the payment status; when unset, status is computed from fee vs payments. */
   paymentStatusOverride?: PaymentStatus;
+  /** Values of case fields added in Settings, by field key. */
+  extra?: Record<string, string>;
   openedAt: string;
   submittedAt?: string;
   decisionAt?: string;
@@ -348,7 +361,7 @@ export type TaskWatchKind = 'checklist-item' | 'case-documents' | 'case-payment'
 
 export const TASK_WATCH_KINDS: TaskWatchKind[] = ['checklist-item', 'case-documents', 'case-payment', 'client-details'];
 
-/** Client details whose absence can be watched. */
+/** Client details whose absence can be watched (the built-in ones; fields added in Settings too). */
 export const CLIENT_DETAIL_LABELS = {
   phone: 'טלפון',
   idNumber: 'תעודת זהות',
@@ -357,10 +370,23 @@ export const CLIENT_DETAIL_LABELS = {
   city: 'עיר',
 } as const;
 
-export type ClientDetailField = keyof typeof CLIENT_DETAIL_LABELS;
+/** A client detail key: a built-in column or a field added in Settings (f-xxxx). */
+export type ClientDetailField = string;
 
-export function missingClientDetails(client: Partial<Record<ClientDetailField, string | undefined>>): ClientDetailField[] {
-  return (Object.keys(CLIENT_DETAIL_LABELS) as ClientDetailField[]).filter((f) => !client[f]?.trim());
+/** The client's value for a field, built-in column or Settings-added. */
+export function fieldValue(record: { extra?: Record<string, string> }, key: string): string {
+  const own = (record as unknown as Record<string, unknown>)[key];
+  if (typeof own === 'string') return own;
+  if (typeof own === 'number') return String(own);
+  return record.extra?.[key] ?? '';
+}
+
+/** Keys of the details marked "needed" in Settings that this client is missing. */
+export function missingClientDetails(
+  client: { extra?: Record<string, string> },
+  fields: FieldDef[] = DEFAULT_CLIENT_FIELDS,
+): ClientDetailField[] {
+  return fields.filter((f) => fieldNeeded(f) && !fieldValue(client, f.key).trim()).map((f) => f.key);
 }
 
 /** "Closes by itself when …" — shown on the reminder. */
@@ -500,6 +526,158 @@ export interface ConfigOption {
   color?: string;
 }
 
+// ── Stages, phases and trays (editable in Settings) ─────────────────────────
+
+/** The four groups the journey bar shows; their names are editable. */
+export type PhaseId = 'intake' | 'submit' | 'office' | 'finish';
+export const PHASE_IDS: PhaseId[] = ['intake', 'submit', 'office', 'finish'];
+
+export interface PhaseDef {
+  id: PhaseId;
+  label: string;
+}
+
+/** Today-screen trays a stage can feed ("missing" and "flagged" follow the data, not the stage). */
+export type StageTray = 'ready' | 'office' | 'payment';
+
+export interface StageDef {
+  /** A built-in code, or st-xxxx for a stage added in Settings. */
+  code: CaseStage;
+  label: string;
+  phase: PhaseId;
+  /** Hidden stages are skipped: buttons that would move a case there move it to the next shown stage. */
+  hidden?: boolean;
+  /** What to do in this stage — shown in the "next step" panel. */
+  hint?: string;
+  tray?: StageTray;
+}
+
+export const DEFAULT_PHASES: PhaseDef[] = [
+  { id: 'intake', label: 'קליטה ומסמכים' },
+  { id: 'submit', label: 'הכנה והגשה' },
+  { id: 'office', label: 'בטיפול המשרד' },
+  { id: 'finish', label: 'תשלום וסגירה' },
+];
+
+const DEFAULT_STAGE_PHASE: Record<BuiltInStage, PhaseId> = {
+  'new-client': 'intake',
+  'collecting-documents': 'intake',
+  'documents-review': 'intake',
+  'ready-for-client': 'submit',
+  'sent-to-client': 'submit',
+  'submitted': 'submit',
+  'in-government-review': 'office',
+  'action-required': 'office',
+  'decision-received': 'office',
+  'awaiting-payment': 'finish',
+  'closed': 'finish',
+};
+
+const DEFAULT_STAGE_TRAY: Partial<Record<BuiltInStage, StageTray>> = {
+  'ready-for-client': 'ready',
+  'sent-to-client': 'ready',
+  'submitted': 'office',
+  'in-government-review': 'office',
+  'awaiting-payment': 'payment',
+};
+
+export const DEFAULT_STAGES: StageDef[] = CASE_STAGES.map((code) => ({
+  code,
+  label: STAGE_LABELS[code],
+  phase: DEFAULT_STAGE_PHASE[code],
+  ...(DEFAULT_STAGE_TRAY[code] ? { tray: DEFAULT_STAGE_TRAY[code] } : {}),
+}));
+
+export type TrayId = 'missing' | 'ready' | 'office' | 'payment' | 'flagged';
+
+export interface TrayDef {
+  id: TrayId;
+  label: string;
+  hint: string;
+  hidden?: boolean;
+}
+
+export const DEFAULT_TRAYS: TrayDef[] = [
+  { id: 'missing', label: 'מסמכים חסרים', hint: 'לבקש מהלקוחות' },
+  { id: 'ready', label: 'מוכן להגשה', hint: 'לשלוח ללקוח או להגיש' },
+  { id: 'office', label: 'ממתין למשרד', hint: 'הוגש, מחכים לתשובה' },
+  { id: 'payment', label: 'ממתין לתשלום', hint: 'לגבות שכר טרחה' },
+  { id: 'flagged', label: 'מסומנים', hint: 'תקועים או בבירור' },
+];
+
+// ── Client and case fields (editable in Settings) ───────────────────────────
+
+export type FieldType = 'text' | 'longtext' | 'phone' | 'email' | 'number' | 'date' | 'select' | 'yesno';
+
+export const FIELD_TYPE_LABELS: Record<FieldType, string> = {
+  text: 'טקסט',
+  longtext: 'טקסט ארוך',
+  phone: 'טלפון',
+  email: 'אימייל',
+  number: 'מספר',
+  date: 'תאריך',
+  select: 'בחירה מרשימה',
+  yesno: 'כן / לא',
+};
+
+/** optional: nice to have · needed: shown as missing until filled · required: can't save without it. */
+export type FieldNeed = 'optional' | 'needed' | 'required';
+
+export const FIELD_NEED_LABELS: Record<FieldNeed, string> = {
+  optional: 'רשות',
+  needed: 'נדרש להשלמה',
+  required: 'חובה',
+};
+
+export interface FieldDef {
+  /** Built-in column name, or f-xxxx for a field added in Settings (stored in `extra`). */
+  key: string;
+  label: string;
+  type: FieldType;
+  /** Choices for a 'select' field added in Settings. */
+  options?: string[];
+  visible: boolean;
+  need: FieldNeed;
+  builtIn?: boolean;
+  /** Shown on the client card in lists / in the case header. */
+  inList?: boolean;
+  placeholder?: string;
+}
+
+/** True when the field must be filled or is tracked as missing. */
+export function fieldNeeded(f: Pick<FieldDef, 'need' | 'visible'>) {
+  return f.visible && f.need !== 'optional';
+}
+
+export const DEFAULT_CLIENT_FIELDS: FieldDef[] = [
+  { key: 'phone', label: 'טלפון', type: 'phone', visible: true, need: 'required', builtIn: true, inList: true },
+  { key: 'idNumber', label: 'תעודת זהות', type: 'text', visible: true, need: 'needed', builtIn: true, inList: true },
+  { key: 'email', label: 'אימייל', type: 'email', visible: true, need: 'needed', builtIn: true },
+  { key: 'address', label: 'כתובת', type: 'text', visible: true, need: 'needed', builtIn: true },
+  { key: 'city', label: 'עיר', type: 'text', visible: true, need: 'needed', builtIn: true, inList: true },
+  { key: 'notes', label: 'הערות', type: 'longtext', visible: true, need: 'optional', builtIn: true },
+];
+
+/** Case fields; office / company / caseKind take their choices from the lists in Settings. */
+export const DEFAULT_CASE_FIELDS: FieldDef[] = [
+  { key: 'company', label: 'חברה מטפלת', type: 'select', visible: true, need: 'required', builtIn: true, inList: true },
+  { key: 'caseKind', label: 'סוג התיק', type: 'select', visible: true, need: 'optional', builtIn: true },
+  { key: 'office', label: 'משרד', type: 'select', visible: true, need: 'optional', builtIn: true, inList: true },
+  { key: 'fee', label: 'שכר טרחה', type: 'number', visible: true, need: 'optional', builtIn: true },
+  { key: 'referenceNumber', label: 'מספר תיק במשרד', type: 'text', visible: true, need: 'optional', builtIn: true },
+  { key: 'description', label: 'תיאור', type: 'longtext', visible: true, need: 'optional', builtIn: true },
+];
+
+export const BUILT_IN_CLIENT_FIELD_KEYS = DEFAULT_CLIENT_FIELDS.map((f) => f.key);
+export const BUILT_IN_CASE_FIELD_KEYS = DEFAULT_CASE_FIELDS.map((f) => f.key);
+
+/** Areas of the system that can be switched off when not used. */
+export interface ModuleSwitches {
+  tasks: boolean;
+  chat: boolean;
+  payments: boolean;
+}
+
 /**
  * Everything an admin can edit at runtime from the Settings page.
  * Defaults come from the constants above; saved overrides are merged on top.
@@ -519,8 +697,15 @@ export interface AppConfig {
   documentTemplates: { code: string; label: string }[];
   paymentMethods: ConfigOption[];
   offices: ConfigOption[];
-  /** Editable Hebrew wording for each pipeline stage (keys are fixed). */
-  stageLabels: Record<string, string>;
+  /** The pipeline, in order (grouped by phase). 'closed' is always last. */
+  stages: StageDef[];
+  phases: PhaseDef[];
+  trays: TrayDef[];
+  clientFields: FieldDef[];
+  caseFields: FieldDef[];
+  modules: ModuleSwitches;
+  /** Overrides for on-screen wording, by key (see lib/texts.ts). */
+  texts: Record<string, string>;
 }
 
 export const DEFAULT_APP_CONFIG: AppConfig = {
@@ -536,7 +721,13 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   documentTemplates: documentTemplates.map((t) => ({ code: t.code, label: t.label })),
   paymentMethods: Object.entries(PAYMENT_METHOD_LABELS).map(([value, label]) => ({ value, label })),
   offices: Object.entries(OFFICE_LABELS).map(([value, label]) => ({ value, label })),
-  stageLabels: { ...STAGE_LABELS },
+  stages: DEFAULT_STAGES,
+  phases: DEFAULT_PHASES,
+  trays: DEFAULT_TRAYS,
+  clientFields: DEFAULT_CLIENT_FIELDS,
+  caseFields: DEFAULT_CASE_FIELDS,
+  modules: { tasks: true, chat: true, payments: true },
+  texts: {},
 };
 
 /** Look up a label in a config option list, falling back to the raw value. */
@@ -545,9 +736,54 @@ export function optionLabel(options: ConfigOption[] | undefined, value?: string,
   return options?.find((o) => o.value === value)?.label ?? value;
 }
 
+type StageConfig = Partial<Pick<AppConfig, 'stages' | 'phases'>> | undefined;
+
+/** Every stage in pipeline order, shown and hidden. */
+export function stageDefs(config: StageConfig): StageDef[] {
+  return config?.stages?.length ? config.stages : DEFAULT_STAGES;
+}
+
+export function stageDef(config: StageConfig, code: string): StageDef | undefined {
+  return stageDefs(config).find((s) => s.code === code);
+}
+
+/** Position in the pipeline (-1 for an unknown code). */
+export function stageOrder(config: StageConfig, code: string) {
+  return stageDefs(config).findIndex((s) => s.code === code);
+}
+
 /** Stage label from config, falling back to the built-in Hebrew label. */
-export function stageLabelOf(config: Pick<AppConfig, 'stageLabels'> | undefined, stage: string) {
-  return config?.stageLabels?.[stage] ?? STAGE_LABELS[stage as CaseStage] ?? stage;
+export function stageLabelOf(config: StageConfig, stage: string) {
+  return stageDef(config, stage)?.label ?? STAGE_LABELS[stage as BuiltInStage] ?? stage;
+}
+
+/** The next shown stage after `from` (undefined at the end). */
+export function nextStage(config: StageConfig, from: string): CaseStage | undefined {
+  const list = stageDefs(config);
+  const at = list.findIndex((s) => s.code === from);
+  return list.slice(at + 1).find((s) => !s.hidden)?.code;
+}
+
+/** Where a move to `target` really lands: the stage itself, or the next shown one if it is hidden. */
+export function resolveStage(config: StageConfig, target: CaseStage): CaseStage {
+  const def = stageDef(config, target);
+  if (def && !def.hidden) return target;
+  return (def && nextStage(config, target)) || 'closed';
+}
+
+/** Phases with their shown stages (plus `current` even if hidden, so a case never drops off its bar). */
+export function phaseGroups(config: StageConfig, current?: string) {
+  const phases = config?.phases?.length ? config.phases : DEFAULT_PHASES;
+  const stages = stageDefs(config);
+  return phases.map((p) => ({ ...p, stages: stages.filter((s) => s.phase === p.id && (!s.hidden || s.code === current)) }));
+}
+
+export function phaseOfStage(config: StageConfig, code: string): PhaseId {
+  return stageDef(config, code)?.phase ?? DEFAULT_STAGE_PHASE[code as BuiltInStage] ?? 'intake';
+}
+
+export function stageTray(config: StageConfig, code: string): StageTray | undefined {
+  return stageDef(config, code)?.tray;
 }
 
 /** Colour of an operating company: the one set in Settings, else the built-in default. */

@@ -1,15 +1,15 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import {
-  CASE_STAGES,
   COMPANY_LABELS,
   DEFAULT_CHECKLIST_CODES,
   STAGE_LABELS,
+  type AppConfig,
   type CaseKind,
   type CaseStage,
   type OperatingCompany,
 } from '@/lib/domain';
-import { createCase, createClient, createPayment, updateCase } from '@/lib/store';
+import { createCase, createClient, createPayment, getConfig, updateCase } from '@/lib/store';
 import { requireAdmin } from '@/lib/viewer';
 
 export interface ImportRow {
@@ -44,10 +44,11 @@ function resolveKind(raw?: string): CaseKind {
   return 'new';
 }
 
-function resolveStage(raw?: string): CaseStage {
+function importStage(raw: string | undefined, config: AppConfig): CaseStage {
   const value = (raw || '').trim();
   if (!value) return 'collecting-documents';
-  if (CASE_STAGES.includes(value as CaseStage)) return value as CaseStage;
+  // A stage code or name as set in Settings, then the built-in names, then keywords.
+  for (const s of config.stages) if (value === s.code || value === s.label) return s.code;
   for (const [stage, label] of Object.entries(STAGE_LABELS)) {
     if (value === label) return stage as CaseStage;
   }
@@ -70,6 +71,7 @@ export async function POST(request: NextRequest) {
   }
 
   const rows = Array.isArray(body.rows) ? body.rows : [];
+  const config = await getConfig();
   if (!rows.length) return NextResponse.json({ ok: false, error: 'אין שורות לייבוא' }, { status: 400 });
   if (rows.length > 500) return NextResponse.json({ ok: false, error: 'עד 500 שורות בייבוא אחד' }, { status: 400 });
 
@@ -114,7 +116,7 @@ export async function POST(request: NextRequest) {
     }
     casesCreated += 1;
 
-    const stage = resolveStage(row.stage);
+    const stage = importStage(row.stage, config);
     if (stage !== caseRecord.stage || row.trouble) {
       await updateCase(caseRecord.id, { stage, troubleFlag: Boolean(row.trouble) });
     }

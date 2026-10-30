@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { countMissingItems, type CaseKind, type OperatingCompany, type GovernmentOffice } from '@/lib/domain';
 import { caseVisibleTo, createCase, createClient, getCaseFinance, getConfig, listCases, listPayments, listVisibleClients } from '@/lib/store';
 import { actorId, getViewer } from '@/lib/viewer';
+import { caseInputProblem, cleanExtraInput, missingRequired, requiredError } from '@/lib/fields';
 
 export async function GET() {
   const auth = await getViewer();
@@ -44,10 +45,15 @@ export async function POST(request: NextRequest) {
     address?: string;
     city?: string;
     notes?: string;
+    /** Values of client fields added in Settings. */
+    extra?: Record<string, unknown>;
     /** Creating a client opens a case (unless disabled in settings / by the flag). */
     createCase?: boolean;
     case?: {
       title?: string;
+      referenceNumber?: string;
+      description?: string;
+      extra?: Record<string, unknown>;
       company?: OperatingCompany;
       caseKind?: CaseKind;
       fee?: number;
@@ -66,27 +72,35 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ ok: false, error: 'Invalid request body' }, { status: 400 });
   }
 
-  if (!body.fullName?.trim() || !body.phone?.trim()) {
-    return NextResponse.json({ ok: false, error: 'שם מלא וטלפון הם שדות חובה' }, { status: 400 });
+  if (!body.fullName?.trim()) {
+    return NextResponse.json({ ok: false, error: 'שם מלא הוא שדה חובה' }, { status: 400 });
   }
 
   const config = await getConfig();
+  const extra = cleanExtraInput(body.extra, config.clientFields);
+  const details = { phone: body.phone, idNumber: body.idNumber, email: body.email, address: body.address, city: body.city, notes: body.notes };
+  const missing = missingRequired({ ...details, ...extra }, config.clientFields, 'create');
+  if (missing.length) return NextResponse.json({ ok: false, error: requiredError(missing) }, { status: 400 });
+
   // Open a case unless the admin turned auto-create off (the flag can override).
   const shouldCreateCase = body.createCase ?? config.autoCreateCaseOnClient;
   // Checked before the client is saved, so a refused request leaves nothing half-made.
-  if (shouldCreateCase && !config.companies.some((c) => c.value === body.case?.company)) {
-    return NextResponse.json({ ok: false, error: 'יש לבחור חברה מטפלת לתיק' }, { status: 400 });
+  const caseExtra = cleanExtraInput(body.case?.extra, config.caseFields);
+  if (shouldCreateCase) {
+    const caseProblem = caseInputProblem(config, { ...body.case, extra: caseExtra });
+    if (caseProblem) return NextResponse.json({ ok: false, error: caseProblem }, { status: 400 });
   }
 
   const creator = actorId(auth.session);
   const record = await createClient({
     fullName: body.fullName,
-    phone: body.phone,
+    phone: body.phone ?? '',
     idNumber: body.idNumber,
     email: body.email,
     address: body.address,
     city: body.city,
     notes: body.notes,
+    extra,
     createdBy: creator,
   });
 
@@ -109,6 +123,9 @@ export async function POST(request: NextRequest) {
       customChecklist: Array.isArray(body.case?.customChecklist)
         ? body.case.customChecklist.filter((c): c is string => typeof c === 'string').slice(0, 30)
         : [],
+      referenceNumber: body.case?.referenceNumber,
+      description: body.case?.description,
+      extra: caseExtra,
     });
   }
 

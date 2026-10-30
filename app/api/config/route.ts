@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import type { AppConfig } from '@/lib/domain';
-import { getConfig, saveConfig } from '@/lib/store';
+import { DEFAULT_CASE_FIELDS, DEFAULT_CLIENT_FIELDS, type AppConfig } from '@/lib/domain';
+import { getConfig, normalizeFields, normalizeStages, saveConfig, StageInUseError } from '@/lib/store';
+import { TEXT_DEFAULTS } from '@/lib/texts';
 import { getViewer } from '@/lib/viewer';
 
 /** Any signed-in user reads config (labels are needed everywhere). */
@@ -19,7 +20,7 @@ export async function PATCH(request: NextRequest) {
     return NextResponse.json({ ok: false, error: 'רק מנהל יכול לערוך הגדרות' }, { status: 403 });
   }
 
-  let body: Partial<AppConfig>;
+  let body: Partial<AppConfig> & { stageMoves?: Record<string, unknown> };
   try {
     body = await request.json();
   } catch {
@@ -59,14 +60,60 @@ export async function PATCH(request: NextRequest) {
       .filter((c) => c && typeof c.code === 'string' && typeof c.label === 'string' && c.code.trim() && c.label.trim())
       .map((c) => ({ code: c.code.trim(), label: c.label.trim() }));
   }
-  if (body.stageLabels && typeof body.stageLabels === 'object') {
-    const labels: Record<string, string> = {};
-    for (const [key, value] of Object.entries(body.stageLabels)) {
-      if (typeof value === 'string' && value.trim()) labels[key] = value.trim();
+  if (Array.isArray(body.stages)) {
+    const stages = normalizeStages(body.stages);
+    if (!stages.some((s) => s.code !== 'closed' && !s.hidden)) {
+      return NextResponse.json({ ok: false, error: 'צריך להשאיר לפחות שלב פעיל אחד לפני "סגור"' }, { status: 400 });
     }
-    patch.stageLabels = labels;
+    patch.stages = stages;
+  }
+  if (Array.isArray(body.phases)) {
+    patch.phases = body.phases
+      .filter((p) => p && typeof p.id === 'string' && typeof p.label === 'string')
+      .map((p) => ({ id: p.id, label: p.label.trim().slice(0, 40) }));
+  }
+  if (Array.isArray(body.trays)) {
+    patch.trays = body.trays
+      .filter((t) => t && typeof t.id === 'string')
+      .map((t) => ({
+        id: t.id,
+        label: String(t.label ?? '').trim().slice(0, 40),
+        hint: String(t.hint ?? '').trim().slice(0, 80),
+        ...(t.hidden ? { hidden: true } : {}),
+      }));
+  }
+  if (Array.isArray(body.clientFields)) patch.clientFields = normalizeFields(body.clientFields, DEFAULT_CLIENT_FIELDS);
+  if (Array.isArray(body.caseFields)) patch.caseFields = normalizeFields(body.caseFields, DEFAULT_CASE_FIELDS);
+  if (body.modules && typeof body.modules === 'object') {
+    patch.modules = {
+      tasks: body.modules.tasks !== false,
+      chat: body.modules.chat !== false,
+      payments: body.modules.payments !== false,
+    };
+  }
+  if (body.texts && typeof body.texts === 'object') {
+    // Only known keys, and only wording that differs from the default.
+    const texts: Record<string, string> = {};
+    for (const [key, value] of Object.entries(body.texts)) {
+      if (key in TEXT_DEFAULTS && typeof value === 'string' && value.trim() && value.trim() !== TEXT_DEFAULTS[key]) {
+        texts[key] = value.trim().slice(0, 120);
+      }
+    }
+    patch.texts = texts;
+  }
+  // Where the cases of a removed stage go: { removedCode: targetCode }.
+  const stageMoves: Record<string, string> = {};
+  if (body.stageMoves && typeof body.stageMoves === 'object') {
+    for (const [from, to] of Object.entries(body.stageMoves)) if (typeof to === 'string') stageMoves[from] = to;
   }
 
-  const saved = await saveConfig(patch);
-  return NextResponse.json({ ok: true, data: saved });
+  try {
+    const saved = await saveConfig(patch, stageMoves);
+    return NextResponse.json({ ok: true, data: saved });
+  } catch (error) {
+    if (error instanceof StageInUseError) {
+      return NextResponse.json({ ok: false, error: error.message, inUse: error.inUse }, { status: 409 });
+    }
+    throw error;
+  }
 }
