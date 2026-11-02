@@ -48,6 +48,7 @@ export async function sendViaGmail(to: string, message: OutgoingMessage): Promis
       subject: message.email.subject,
       html: message.email.html,
       text: message.email.text,
+      attachments: message.attachments?.map((a) => ({ filename: a.filename, path: a.path, contentType: a.contentType })),
     });
     return { ok: true, providerMessageId: info.messageId };
   } catch (error) {

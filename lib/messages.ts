@@ -21,10 +21,20 @@ export interface WhatsAppContent {
   otpButtonCode?: string;
 }
 
+/** A file sent inside the email itself (email only; WhatsApp ignores it). */
+export interface EmailAttachment {
+  /** The name the recipient sees and saves the file under. */
+  filename: string;
+  /** Where the file is on disk. */
+  path: string;
+  contentType?: string;
+}
+
 export interface OutgoingMessage {
   kind: 'password-reset' | 'documents' | 'reminder' | 'task-assigned' | 'chat' | 'test';
   email: EmailContent;
   whatsapp: WhatsAppContent;
+  attachments?: EmailAttachment[];
 }
 
 function escapeHtml(value: string) {
@@ -129,6 +139,33 @@ export function documentsLinkMessage(input: {
       template: env.whatsappTemplates.documents,
       params: [input.clientName, input.businessName, input.label, input.link, String(input.days)].map((v) => whatsappParam(v)),
     },
+  };
+}
+
+/** Documents sent as real attachments, under their original file names (email only). */
+export function documentsAttachedMessage(input: {
+  businessName: string;
+  clientName: string;
+  label: string;
+  attachments: EmailAttachment[];
+}): OutgoingMessage {
+  const intro = `שלום ${input.clientName}, ${input.businessName} שלח/ה לך ${input.label}.`;
+  const attachedLine = input.attachments.length === 1 ? 'הקובץ מצורף להודעה זו:' : 'הקבצים מצורפים להודעה זו:';
+  const names = input.attachments.map((a) => a.filename);
+  return {
+    kind: 'documents',
+    email: {
+      subject: `${input.label} מ${input.businessName}`,
+      html: emailLayout({
+        businessName: input.businessName,
+        heading: 'מסמכים עבורך',
+        paragraphs: [intro, attachedLine, ...names.map((n) => `• ${n}`)],
+      }),
+      text: textLayout([intro, attachedLine, ...names.map((n) => `• ${n}`)]),
+    },
+    // Not used: WhatsApp always gets the link message.
+    whatsapp: { template: env.whatsappTemplates.documents, params: [] },
+    attachments: input.attachments,
   };
 }
 

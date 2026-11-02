@@ -53,7 +53,7 @@ import {
 } from '@/lib/domain';
 import { afterCommit, iso, isoOpt, nul, opt, sql, sqlCount, sqlOne, transaction } from '@/lib/db';
 import { env } from '@/lib/env';
-import { documentsLinkMessage, passwordResetMessage, taskAssignedMessage } from '@/lib/messages';
+import { documentsAttachedMessage, documentsLinkMessage, passwordResetMessage, taskAssignedMessage, type EmailAttachment } from '@/lib/messages';
 import { deliver, directChannelAvailable, type DeliveryChannel } from '@/lib/notify';
 import { consumeRateLimit } from '@/lib/rate-limit';
 import { signShareToken } from '@/lib/share';
@@ -991,9 +991,37 @@ export type SendChannel = DeliveryChannel;
 const CHANNEL_LABEL: Record<SendChannel, string> = { email: 'אימייל', whatsapp: 'וואטסאפ' };
 
 /**
- * Send one or more documents to their client as a single secure, expiring
- * download link by email (Resend) or WhatsApp (Meta). All documents must
- * belong to the same client. Returns the link on success.
+ * Gmail refuses messages over 25 MB, and attachments grow by a third when
+ * encoded, so files up to about 18 MB in total go inside the email.
+ */
+const MAX_ATTACHMENT_BYTES = 18 * 1024 * 1024;
+
+/** The files as email attachments under their original names, or null when they can't all go in one email. */
+function documentAttachments(docs: DocumentRecord[]): EmailAttachment[] | null {
+  const used = new Map<string, number>();
+  let total = 0;
+  const out: EmailAttachment[] = [];
+  for (const doc of docs) {
+    const filePath = documentFilePath(doc);
+    if (!fs.existsSync(filePath)) return null;
+    total += fs.statSync(filePath).size;
+    if (total > MAX_ATTACHMENT_BYTES) return null;
+    // Two files with the same name would overwrite each other in the recipient's downloads.
+    const name = path.basename(doc.originalName || doc.fileName) || 'file';
+    const seen = used.get(name) ?? 0;
+    used.set(name, seen + 1);
+    const ext = path.extname(name);
+    const filename = seen ? `${name.slice(0, name.length - ext.length)} (${seen + 1})${ext}` : name;
+    out.push({ filename, path: filePath, contentType: doc.mimeType || undefined });
+  }
+  return out;
+}
+
+/**
+ * Send one or more documents to their client. By email they go as real
+ * attachments with their original names; when they are too big for one email
+ * (or by WhatsApp) the client gets a single secure, expiring download link.
+ * All documents must belong to the same client.
  */
 export async function sendDocumentsLink(documentIds: string[], channel: SendChannel) {
   const ids = Array.from(new Set(documentIds.filter(Boolean)));
@@ -1021,15 +1049,17 @@ export async function sendDocumentsLink(documentIds: string[], channel: SendChan
     };
   }
 
-  const token = signShareToken(docs.map((d) => d.id), 14);
-  const link = `${env.appBaseUrl}/api/share/${token}`;
   const label = docs.length === 1 ? docs[0].label || docs[0].originalName : `${docs.length} מסמכים`;
   const { businessName } = await getConfig();
+  const attachments = channel === 'email' ? documentAttachments(docs) : null;
+  const link = attachments ? undefined : `${env.appBaseUrl}/api/share/${signShareToken(docs.map((d) => d.id), 14)}`;
 
   const result = await deliver({
     channel,
     to: { email: client.email, phone: client.phone },
-    message: documentsLinkMessage({ businessName, clientName: client.fullName, label, link, days: 14 }),
+    message: attachments
+      ? documentsAttachedMessage({ businessName, clientName: client.fullName, label, attachments })
+      : documentsLinkMessage({ businessName, clientName: client.fullName, label, link: link!, days: 14 }),
     relatedId: clientId,
   });
   if (!result.ok) return { ok: false as const, error: `השליחה נכשלה: ${result.error}` };
@@ -1038,9 +1068,11 @@ export async function sendDocumentsLink(documentIds: string[], channel: SendChan
     type: 'document-sent',
     clientId,
     caseId: docs[0].caseId,
-    summary: `נשלח קישור ל${label} ל${client.fullName} דרך ${CHANNEL_LABEL[channel]}`,
+    summary: attachments
+      ? `נשלח${docs.length === 1 ? '' : 'ו'} ${label} ל${client.fullName} באימייל, כקבצים מצורפים`
+      : `נשלח קישור ל${label} ל${client.fullName} דרך ${CHANNEL_LABEL[channel]}`,
   });
-  return { ok: true as const, link };
+  return { ok: true as const, link, attached: Boolean(attachments) };
 }
 
 /** Single-document convenience wrapper. */

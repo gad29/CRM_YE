@@ -2,6 +2,7 @@
 // through Meta's Cloud API.
 // Every attempt is written to notification_log so the Connections page can
 // show what went out, and Meta's delivery-status webhook can update it.
+import fs from 'node:fs';
 import { emailProvider, env, hasWhatsAppConfig } from '@/lib/env';
 import { sendViaGmail } from '@/lib/gmail';
 import { sql } from '@/lib/db';
@@ -87,6 +88,15 @@ async function sendViaResend(to: string, message: OutgoingMessage, idempotencyKe
         subject: message.email.subject,
         html: message.email.html,
         text: message.email.text,
+        ...(message.attachments?.length
+          ? {
+              attachments: message.attachments.map((a) => ({
+                filename: a.filename,
+                content: fs.readFileSync(a.path).toString('base64'),
+                ...(a.contentType ? { content_type: a.contentType } : {}),
+              })),
+            }
+          : {}),
         ...(env.emailReplyTo ? { reply_to: env.emailReplyTo } : {}),
       }),
       signal: AbortSignal.timeout(15_000),

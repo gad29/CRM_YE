@@ -123,7 +123,7 @@ export function DocumentsPanel({
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   }
 
-  /** Send a set of documents to the client as one secure link. */
+  /** Send a set of documents to the client: attached to an email, or as one secure link. */
   async function sendDocuments(documentIds: string[], channel: 'email' | 'whatsapp') {
     setSending(true);
     try {
@@ -138,7 +138,9 @@ export function DocumentsPanel({
         return;
       }
       const where = channel === 'email' ? 'במייל' : 'בוואטסאפ';
-      toast(documentIds.length === 1 ? `הקישור נשלח ללקוח ${where}` : `קישור ל-${documentIds.length} מסמכים נשלח ללקוח ${where}`);
+      if (data.attached) toast(documentIds.length === 1 ? 'הקובץ נשלח ללקוח במייל' : `${documentIds.length} קבצים נשלחו ללקוח במייל`);
+      else if (channel === 'email') toast('הקבצים גדולים מדי למייל אחד, אז נשלח ללקוח קישור להורדה');
+      else toast(documentIds.length === 1 ? `הקישור נשלח ללקוח ${where}` : `קישור ל-${documentIds.length} מסמכים נשלח ללקוח ${where}`);
       if (documentIds.length > 1) setSelected([]);
     } catch {
       toast('אין חיבור לשרת — השליחה לא בוצעה', 'error');

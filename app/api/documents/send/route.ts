@@ -3,7 +3,7 @@ import type { NextRequest } from 'next/server';
 import { documentVisibleTo, getDocument, sendDocumentsLink, type SendChannel } from '@/lib/store';
 import { getViewer } from '@/lib/viewer';
 
-/** Send one or several documents to their client as a single secure link (email via Resend, WhatsApp via Meta). */
+/** Send one or several documents to their client: attached to an email when they fit, otherwise as a single secure link. */
 export async function POST(request: NextRequest) {
   const auth = await getViewer();
   if (!auth) return NextResponse.json({ ok: false }, { status: 401 });
@@ -35,5 +35,5 @@ export async function POST(request: NextRequest) {
 
   const result = await sendDocumentsLink(ids, channel as SendChannel);
   if (!result.ok) return NextResponse.json({ ok: false, error: result.error }, { status: 400 });
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({ ok: true, attached: result.attached });
 }
