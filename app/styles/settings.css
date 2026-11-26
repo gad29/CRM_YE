@@ -4,7 +4,7 @@
    ────────────────────────────────────────────────────────────────────────── */
 
 .settings-wrap { min-width: 0; }
-/* Ten tabs: they scroll sideways on a phone; the page itself never does. */
+/* Eleven tabs: they scroll sideways on a phone; the page itself never does. */
 .settings-tabs { max-width: 100%; margin-inline: -2px; padding-inline: 2px; scroll-snap-type: x proximity; }
 .settings-tabs .tab { scroll-snap-align: start; }
 .settings-blocked { color: var(--red); font-weight: 600; }
@@ -154,3 +154,42 @@
   .tray-edit .input { flex-basis: 100% !important; }
   .option-input.input { width: 100%; }
 }
+
+/* ── Bot access ───────────────────────────────────────────────────────────── */
+
+.bot-connect { display: grid; gap: 4px; margin-bottom: 18px; }
+.bot-connect-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.bot-connect-text { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.bot-connect-value { overflow-wrap: anywhere; text-align: left; }
+.bot-connect-note { margin: 6px 0 0; }
+
+.bot-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; align-items: start; }
+.bot-form-foot { grid-column: 1 / -1; }
+
+.bot-secret .temp-pass-value { align-items: flex-start; }
+.bot-secret .temp-pass-value > span { font-size: 15px; letter-spacing: 0.02em; overflow-wrap: anywhere; min-width: 0; }
+.bot-example summary { cursor: pointer; color: var(--accent); }
+.bot-example pre {
+  margin: 10px 0;
+  padding: 12px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.bot-key-off { opacity: 0.6; }
+.bot-key-off .button { opacity: 1; }
+
+.bot-log { display: grid; }
+.bot-log-row { display: grid; grid-template-columns: 92px minmax(0, 1fr) minmax(0, 140px); gap: 12px; align-items: baseline; padding: 8px 2px; border-bottom: 1px solid var(--line); }
+.bot-log-row:last-child { border-bottom: 0; }
+
+@media (max-width: 560px) {
+  .bot-connect-row { flex-wrap: wrap; }
+  .bot-log-row { grid-template-columns: 74px minmax(0, 1fr); }
+  .bot-log-row > :last-child { display: none; }
+}
+.bot-revoked summary { cursor: pointer; padding: 10px 2px 4px; }

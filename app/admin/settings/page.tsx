@@ -8,6 +8,7 @@ import type { AppConfig } from '@/lib/domain';
 import { useConfigRefresh } from '@/components/config-provider';
 import { PageHead } from '@/components/ui/bits';
 import { useToast } from '@/components/ui/toast';
+import { BotAccessCard } from './bot-access';
 import { BlankContractCard, GeneralEditor, OptionListEditor, TemplateEditor, type SaveFn } from './editors';
 import { FieldsEditor } from './fields-editor';
 import { ImportCard } from './import-card';
@@ -25,6 +26,7 @@ const TABS = [
   { id: 'payments', label: 'תשלומים' },
   { id: 'interface', label: 'ממשק' },
   { id: 'import', label: 'ייבוא' },
+  { id: 'bot', label: 'חיבור בוט' },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
@@ -191,6 +193,7 @@ function SettingsInner() {
             </>
           )}
           {tab === 'import' && <ImportCard />}
+          {tab === 'bot' && <BotAccessCard />}
         </div>
       )}
     </div>

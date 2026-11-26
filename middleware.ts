@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import { bearerToken, KEY_METHOD_HEADER, KEY_PATH_HEADER, keyRequestProblem } from '@/lib/api-access';
 import { SESSION_COOKIE, verifySessionToken } from '@/lib/session-token';
 
 // Edge runtime: a cheap, stateless gate (signature + scope) for pages and
@@ -14,6 +15,8 @@ function isPublicPath(pathname: string) {
   if (pathname === '/api/auth/login' || pathname === '/api/auth/me') return true;
   if (pathname === '/api/auth/forgot' || pathname === '/api/auth/reset') return true;
   if (pathname === '/api/health' || pathname === '/api/branding') return true;
+  // The shape of the API for bot tools; no data in it.
+  if (pathname === '/api/openapi.json') return true;
   // Shared document links are token-protected inside the route.
   if (pathname.startsWith('/api/share/')) return true;
   // Meta delivery-status webhook — verified by its X-Hub-Signature-256.
@@ -32,7 +35,8 @@ function isAdminOnlyPath(pathname: string) {
     under('/api/settings') ||
     under('/api/import') ||
     under('/api/integrations') ||
-    under('/api/activity')
+    under('/api/activity') ||
+    under('/api/api-keys')
   );
 }
 
@@ -66,8 +70,33 @@ function isCrossSiteWrite(request: NextRequest) {
   return request.headers.get('sec-fetch-site') === 'cross-site';
 }
 
+/**
+ * A request carrying an API key (a bot): only the API paths keys may use
+ * (lib/api-access.ts). The route handler checks the key itself. The cookie is
+ * dropped so a key request never rides on a browser session, and the method
+ * and path are passed on for the read-only check.
+ */
+function apiKeyRequest(request: NextRequest, pathname: string) {
+  if (!pathname.startsWith('/api/')) {
+    return NextResponse.json({ ok: false, error: 'מפתח API פותח רק את ה-API, לא את מסכי המערכת' }, { status: 401 });
+  }
+  const problem = keyRequestProblem(request.method, pathname);
+  if (problem) return NextResponse.json({ ok: false, error: problem }, { status: 403 });
+  const headers = new Headers(request.headers);
+  headers.delete('cookie');
+  headers.set(KEY_METHOD_HEADER, request.method);
+  headers.set(KEY_PATH_HEADER, pathname);
+  return NextResponse.next({ request: { headers } });
+}
+
 export async function middleware(request: NextRequest) {
   const { pathname, search } = request.nextUrl;
+
+  // Browsers never attach an Authorization header on their own, so a key
+  // request can't be forged cross-site; the CSRF guard is for the cookie.
+  if (bearerToken(request.headers.get('authorization')) !== null) {
+    return isPublicPath(pathname) ? NextResponse.next() : apiKeyRequest(request, pathname);
+  }
 
   if (pathname !== '/api/webhooks/whatsapp' && isCrossSiteWrite(request)) {
     return NextResponse.json({ ok: false, error: 'Cross-site request blocked' }, { status: 403 });

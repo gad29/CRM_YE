@@ -827,6 +827,22 @@ function sanitizeFileName(name: string) {
   return base || 'file';
 }
 
+/**
+ * The name a file keeps for the people who download it or get it by email:
+ * as uploaded, minus control characters and the few that no computer allows
+ * in a file name. (The copy on disk uses sanitizeFileName.)
+ */
+function displayFileName(name: string) {
+  const base = path
+    .basename(name.replace(/\\/g, '/'))
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f:*?"<>|]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 200);
+  return base || 'file';
+}
+
 export function documentFilePath(record: Pick<DocumentRecord, 'clientId' | 'fileName'>) {
   return path.join(clientDocumentsFolder(record.clientId), safeSegment(path.basename(record.fileName)));
 }
@@ -865,7 +881,7 @@ export async function saveDocument(input: SaveDocumentInput): Promise<DocumentRe
     clientId: input.clientId,
     caseId: input.caseId,
     fileName,
-    originalName: safeName,
+    originalName: displayFileName(input.originalName),
     label: input.label?.trim() || undefined,
     mimeType: input.mimeType || 'application/octet-stream',
     size: input.buffer.length,
